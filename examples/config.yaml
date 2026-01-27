@@ -12,6 +12,8 @@ cdc:
 tables:
   - name: users
     primaryKey: [id]
+  - name: orders
+    primaryKey: [id]
 
 tolerances:
   rowCountPct: 1.0
