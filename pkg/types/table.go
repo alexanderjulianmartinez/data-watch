@@ -1,4 +1,6 @@
+package types
+
 type TableSpec struct {
-    Name        string
-    PrimaryKey []string
+	Name       string
+	PrimaryKey []string
 }
