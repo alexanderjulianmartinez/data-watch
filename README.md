@@ -70,6 +70,16 @@ DataWatch can be run:
 * as part of migration or deployement workflows
 
 ## Example Output
+```json
+{
+  "table": "users",
+  "schemaDrift": false,
+  "rowCountDeltaPct": 0.4,
+  "missingPrimaryKey": false,
+  "cdcLagSeconds": 12,
+  "status": "healthy"
+}
+```
 
 ## Design Principles
 DataWatch is built around a few core principles:
