@@ -1,6 +1,6 @@
 source:
   type: mysql
-  dsn: user:pass@tcp(localhost:3306)/db
+  dsn: datawatch:datapass@tcp(localhost:3306)/testdb
   schema: mydb
 
 cdc:
