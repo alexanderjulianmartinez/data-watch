@@ -1,4 +1,4 @@
-module data-watch/cmd/datawatch
+module github.com/alexandermartinez/data-watch
 
 go 1.25.6
 
