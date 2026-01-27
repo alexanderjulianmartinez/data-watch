@@ -1,4 +1,4 @@
-# data-watch
+# DataWatch
 Detect silent data corruption and drift in CDC pipelines before it causes incidents
 
 ## Why DataWatch Exists
