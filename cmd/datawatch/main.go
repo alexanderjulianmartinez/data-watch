@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/alexanderjulianmartinez/data-watch/internal/config"
+	"github.com/alexanderjulianmartinez/data-watch/internal/source/mysql"
 )
 
 func main() {
@@ -49,9 +50,29 @@ func runCheck(args []string) error {
 		return err
 	}
 
-	fmt.Println("Config loaded")
-	fmt.Printf("Source: %s\n", cfg.Source.Type)
-	fmt.Printf("Tables to monitor: %d\n", len(cfg.Tables))
+	inspector, err := mysql.NewInspector(cfg.Source.DSN, cfg.Source.Schema)
+	if err != nil {
+		return err
+	}
+
+	for _, table := range cfg.Tables {
+		fmt.Printf("Table: %s\n", table.Name)
+		schema, err := inspector.FetchSchema(table.Name)
+		if err != nil {
+			return err
+		}
+		count, err := inspector.FetchRowCount(table.Name)
+		if err != nil {
+			return err
+		}
+
+		ts, _ := inspector.FetchLatestTimestamp(table.Name)
+		fmt.Printf("  Columns: %d\n", len(schema))
+		fmt.Printf("  Row count: %d\n", count)
+		if !ts.IsZero() {
+			fmt.Printf("  Latest timestamp: %s\n", ts.UTC())
+		}
+	}
 	return nil
 }
 
