@@ -7,7 +7,7 @@ import (
 
 func main() {
     if err := run(os.Args); err != nil {
-       fmt.Fprint(os.Stderr, "datawatch error: %v\n", err)
+       fmt.Fprintf(os.Stderr, "datawatch error: %v\n", err)
        os.Exit(1)
     }
 }
@@ -18,7 +18,7 @@ func run(args []string) error {
       return nil
     }
 
-    switch args[1]
+    switch args[1] {
     case "check":
         fmt.Println("datawatch check (not yet implemented)")
         return nil
@@ -26,12 +26,12 @@ func run(args []string) error {
         printUsage()
         return nil
     default:
-        return fmt.Error("Unknown command: %s", args[1])
+        return fmt.Errorf("Unknown command: %s", args[1])
     }
 }
 
 func printUsage() {
-    fmt.Println(`DataWatch - CDC validation tool
+    fmt.Print(`DataWatch - CDC validation tool
 
 Usage:
   datawatch check --config <path>
