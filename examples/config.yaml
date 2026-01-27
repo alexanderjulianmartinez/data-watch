@@ -1,0 +1,17 @@
+source:
+  type: mysql
+  dsn: userLpass@tcp(localhost::3306)/db
+
+cdc:
+  type: debezium
+  brokers:
+    - localhost:9902
+  topicPrefix: dbserver1
+
+tables:
+  - name: users
+    primaryKey: [id]
+
+tolerances:
+  rowCountPct: 1.0
+  maxLagSeconds: 60
