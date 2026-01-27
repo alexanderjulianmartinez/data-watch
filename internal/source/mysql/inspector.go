@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/alexanderjulianmartinez/data-watch/pkg/types"
+	_ "github.com/go-sql-driver/mysql"
 )
 
 type Inspector struct {
