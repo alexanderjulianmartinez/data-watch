@@ -22,6 +22,7 @@ type SourceConfig struct {
 
 type CDCConfig struct {
 	Type        string   `yaml:"type"`
+	ConnectURL  string   `yaml:"connect_url"`
 	Brokers     []string `yaml:"brokers"`
 	TopicPrefix string   `yaml:"topicPrefix"`
 }

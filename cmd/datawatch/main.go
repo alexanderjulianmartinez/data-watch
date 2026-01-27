@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
 
+	"github.com/alexanderjulianmartinez/data-watch/internal/cdc/debezium"
 	"github.com/alexanderjulianmartinez/data-watch/internal/config"
 	"github.com/alexanderjulianmartinez/data-watch/internal/source/mysql"
 )
@@ -71,6 +73,19 @@ func runCheck(args []string) error {
 		fmt.Printf("  Row count: %d\n", count)
 		if !ts.IsZero() {
 			fmt.Printf("  Latest timestamp: %s\n", ts.UTC())
+		}
+	}
+
+	if cfg.CDC.Type == "debezium" {
+		inspector := debezium.New(cfg.CDC)
+		result, err := inspector.Inspect(context.Background())
+		if err != nil {
+			return err
+		}
+		fmt.Println("\nCDC:", inspector.Name())
+		fmt.Println("  Connector reachable:", result.ConnectorReachable)
+		if len(result.CapturedTables) > 0 {
+			fmt.Println("  Connectors:", result.CapturedTables)
 		}
 	}
 	return nil

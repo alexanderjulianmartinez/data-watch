@@ -5,6 +5,7 @@ source:
 
 cdc:
   type: debezium
+  connect_url: http://localhost:8083
   brokers:
     - localhost:9902
   topicPrefix: dbserver1
