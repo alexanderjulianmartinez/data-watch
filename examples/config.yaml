@@ -1,6 +1,7 @@
 source:
   type: mysql
   dsn: userLpass@tcp(localhost::3306)/db
+  schema: mydb
 
 cdc:
   type: debezium

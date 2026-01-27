@@ -9,26 +9,26 @@ import (
 )
 
 type Config struct {
-	Source SourceConfig `yaml:"source"`
-	CDC   CDCConfig    `yaml:"cdc"`
+	Source SourceConfig  `yaml:"source"`
+	CDC    CDCConfig     `yaml:"cdc"`
 	Tables []TableConfig `yaml:"tables"`
 }
 
 type SourceConfig struct {
-	Type    string `yaml:"type"`
-	DSN	 string `yaml:"dsn"`
-	Schema  string `yaml:"schema"`
+	Type   string `yaml:"type"`
+	DSN    string `yaml:"dsn"`
+	Schema string `yaml:"schema"`
 }
 
 type CDCConfig struct {
-	Type       string `yaml:"type"`
-	Brokers    string `yaml:"brokers"`
-	TopicPrefix   string `yaml:"topicPrefix"`
+	Type        string   `yaml:"type"`
+	Brokers     []string `yaml:"brokers"`
+	TopicPrefix string   `yaml:"topicPrefix"`
 }
 
 type TableConfig struct {
-	Name          string `yaml:"name"`
-	PrimaryKey    string `yaml:"primaryKey"`
+	Name       string   `yaml:"name"`
+	PrimaryKey []string `yaml:"primaryKey"`
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -50,7 +50,7 @@ func LoadConfig(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
-	
+
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -74,7 +74,7 @@ func (c *Config) validate() error {
 		if table.Name == "" {
 			return errors.New("table.name is required")
 		}
-		if table.PrimaryKey == "" {
+		if len(table.PrimaryKey) == 0 {
 			return fmt.Errorf("table %s must define primaryKey", table.Name)
 		}
 	}

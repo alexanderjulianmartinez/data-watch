@@ -36,7 +36,7 @@ func runCheck(args []string) error {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	configPath := fs.String("config", "", "Path to config.yaml")
 
-	if err := fs.Parse(args[2:]); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
@@ -49,7 +49,7 @@ func runCheck(args []string) error {
 		return err
 	}
 
-	fmt.Println("Loaded config successfully")
+	fmt.Println("Config loaded")
 	fmt.Printf("Source: %s\n", cfg.Source.Type)
 	fmt.Printf("Tables to monitor: %d\n", len(cfg.Tables))
 	return nil
