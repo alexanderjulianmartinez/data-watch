@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/alexanderjulianmartinez/data-watch/internal/cdc"
@@ -13,6 +14,10 @@ import (
 
 type Inspector struct {
 	cfg config.CDCConfig
+}
+
+type ConnectorConfig struct {
+	Config map[string]interface{} `json:"config"`
 }
 
 func New(cfg config.CDCConfig) *Inspector {
@@ -46,8 +51,46 @@ func (i *Inspector) Inspect(ctx context.Context) (*cdc.Result, error) {
 		return nil, err
 	}
 
+	// Extract actual table names from connector configurations
+	var capturedTables []string
+	for _, connector := range connectors {
+		configURL := fmt.Sprintf("%s/connectors/%s", i.cfg.ConnectURL, connector)
+		configReq, err := http.NewRequestWithContext(ctx, http.MethodGet, configURL, nil)
+		if err != nil {
+			continue
+		}
+
+		configResp, err := client.Do(configReq)
+		if err != nil {
+			continue
+		}
+		defer configResp.Body.Close()
+
+		var connConfig ConnectorConfig
+		if err := json.NewDecoder(configResp.Body).Decode(&connConfig); err != nil {
+			continue
+		}
+
+		// Extract table.include.list from config
+		if tableList, ok := connConfig.Config["table.include.list"]; ok {
+			if tableListStr, ok := tableList.(string); ok {
+				// Split by comma and extract just the table names (remove schema prefix if present)
+				tables := strings.Split(tableListStr, ",")
+				for _, table := range tables {
+					table = strings.TrimSpace(table)
+					// Extract table name from "schema.table" format
+					if parts := strings.Split(table, "."); len(parts) == 2 {
+						capturedTables = append(capturedTables, parts[1])
+					} else {
+						capturedTables = append(capturedTables, table)
+					}
+				}
+			}
+		}
+	}
+
 	return &cdc.Result{
 		ConnectorReachable: true,
-		CapturedTables:     connectors,
+		CapturedTables:     capturedTables,
 	}, nil
 }
