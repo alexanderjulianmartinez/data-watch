@@ -65,7 +65,7 @@ func runCheck(args []string) error {
 		return err
 	}
 
-	fmt.Printf("Found %d tables in MySQL\n", len(mysqlResult.Tables))
+	fmt.Printf("Found %d table(s) in MySQL\n", len(mysqlResult.Tables))
 	for _, table := range mysqlResult.Tables {
 		fmt.Printf("Table: %s\n", table.Name)
 		fmt.Printf("  Columns: %d\n", len(table.Columns))
@@ -80,6 +80,10 @@ func runCheck(args []string) error {
 			return err
 		}
 		fmt.Println("\nCDC:", inspector.Name())
+		fmt.Println("  Connector reachable:", cdcResult.ConnectorReachable)
+		if len(cdcResult.CapturedTables) > 0 {
+			fmt.Println("  CDC Tables:", cdcResult.CapturedTables)
+		}
 	}
 
 	report := drift.Validate(mysqlResult, cdcResult)
@@ -91,7 +95,6 @@ func runCheck(args []string) error {
 			fmt.Printf("  - %s\n", issue)
 		}
 	}
-
 	return nil
 }
 
