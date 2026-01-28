@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/alexanderjulianmartinez/data-watch/internal/cdc"
 	"github.com/alexanderjulianmartinez/data-watch/internal/cdc/debezium"
 	"github.com/alexanderjulianmartinez/data-watch/internal/config"
+	"github.com/alexanderjulianmartinez/data-watch/internal/drift"
 	"github.com/alexanderjulianmartinez/data-watch/internal/source/mysql"
 )
 
@@ -58,31 +60,35 @@ func runCheck(args []string) error {
 	}
 
 	ctx := context.Background()
-	for _, table := range cfg.Tables {
-		fmt.Printf("Table: %s\n", table.Name)
-		schema, err := inspector.FetchSchema(ctx, table.Name)
-		if err != nil {
-			return err
-		}
-		count, err := inspector.FetchRowCount(ctx, table.Name)
-		if err != nil {
-			return err
-		}
-
-		fmt.Printf("  Columns: %d\n", len(schema))
-		fmt.Printf("  Row count: %d\n", count)
+	mysqlResult, err := inspector.Inspect(ctx)
+	if err != nil {
+		return err
 	}
 
+	fmt.Printf("Found %d tables in MySQL\n", len(mysqlResult.Tables))
+	for _, table := range mysqlResult.Tables {
+		fmt.Printf("Table: %s\n", table.Name)
+		fmt.Printf("  Columns: %d\n", len(table.Columns))
+		fmt.Printf("  Row count: %d\n", table.RowCount)
+	}
+
+	var cdcResult *cdc.Result
 	if cfg.CDC.Type == "debezium" {
 		inspector := debezium.New(cfg.CDC)
-		result, err := inspector.Inspect(context.Background())
+		cdcResult, err = inspector.Inspect(context.Background())
 		if err != nil {
 			return err
 		}
 		fmt.Println("\nCDC:", inspector.Name())
-		fmt.Println("  Connector reachable:", result.ConnectorReachable)
-		if len(result.CapturedTables) > 0 {
-			fmt.Println("  Connectors:", result.CapturedTables)
+	}
+
+	report := drift.Validate(mysqlResult, cdcResult)
+	if len(report.Issues) == 0 {
+		fmt.Println("\nDrift Check: OK")
+	} else {
+		fmt.Println("\nDrift Issues:")
+		for _, issue := range report.Issues {
+			fmt.Printf("  - %s\n", issue)
 		}
 	}
 

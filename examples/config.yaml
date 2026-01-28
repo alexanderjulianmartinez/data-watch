@@ -1,7 +1,7 @@
 source:
   type: mysql
   dsn: datawatch:datapass@tcp(localhost:3306)/testdb
-  schema: mydb
+  schema: testdb
 
 cdc:
   type: debezium

@@ -24,6 +24,11 @@ func (i *Inspector) Inspect(ctx context.Context) (*source.InspectionResult, erro
 			return nil, err
 		}
 
+		primaryKey, err := i.FetchPrimaryKey(ctx, tableName)
+		if err != nil {
+			return nil, err
+		}
+
 		// Extract column names and look for timestamp column
 		var columnNames []string
 		var timestampColumn *string
@@ -39,9 +44,10 @@ func (i *Inspector) Inspect(ctx context.Context) (*source.InspectionResult, erro
 		}
 
 		results = append(results, source.TableInfo{
-			Name:     tableName,
-			Columns:  columnNames,
-			RowCount: rowCount,
+			Name:       tableName,
+			Columns:    columnNames,
+			PrimaryKey: primaryKey,
+			RowCount:   rowCount,
 		})
 	}
 

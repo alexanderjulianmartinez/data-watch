@@ -59,6 +59,29 @@ func (i *Inspector) FetchAllTableNames(ctx context.Context) ([]string, error) {
 	return tables, rows.Err()
 }
 
+func (i *Inspector) FetchPrimaryKey(ctx context.Context, tableName string) ([]string, error) {
+	rows, err := i.db.QueryContext(ctx, `
+		SELECT COLUMN_NAME
+		FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND CONSTRAINT_NAME = 'PRIMARY'
+		ORDER BY ORDINAL_POSITION
+	`, i.schema, tableName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var pkColumns []string
+	for rows.Next() {
+		var colName string
+		if err := rows.Scan(&colName); err != nil {
+			return nil, err
+		}
+		pkColumns = append(pkColumns, colName)
+	}
+	return pkColumns, rows.Err()
+}
+
 func (i *Inspector) FetchSchema(ctx context.Context, tableName string) ([]types.ColumnSpec, error) {
 
 	rows, err := i.db.QueryContext(ctx, `
