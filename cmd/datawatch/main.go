@@ -57,23 +57,20 @@ func runCheck(args []string) error {
 		return err
 	}
 
+	ctx := context.Background()
 	for _, table := range cfg.Tables {
 		fmt.Printf("Table: %s\n", table.Name)
-		schema, err := inspector.FetchSchema(table.Name)
+		schema, err := inspector.FetchSchema(ctx, table.Name)
 		if err != nil {
 			return err
 		}
-		count, err := inspector.FetchRowCount(table.Name)
+		count, err := inspector.FetchRowCount(ctx, table.Name)
 		if err != nil {
 			return err
 		}
 
-		ts, _ := inspector.FetchLatestTimestamp(table.Name)
 		fmt.Printf("  Columns: %d\n", len(schema))
 		fmt.Printf("  Row count: %d\n", count)
-		if !ts.IsZero() {
-			fmt.Printf("  Latest timestamp: %s\n", ts.UTC())
-		}
 	}
 
 	if cfg.CDC.Type == "debezium" {
@@ -88,6 +85,7 @@ func runCheck(args []string) error {
 			fmt.Println("  Connectors:", result.CapturedTables)
 		}
 	}
+
 	return nil
 }
 

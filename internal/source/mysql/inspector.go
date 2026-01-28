@@ -36,9 +36,30 @@ func NewInspector(dsn string, schema string) (*Inspector, error) {
 	}, nil
 }
 
-func (i *Inspector) FetchSchema(tableName string) ([]types.ColumnSpec, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), i.timemout)
-	defer cancel()
+func (i *Inspector) FetchAllTableNames(ctx context.Context) ([]string, error) {
+	rows, err := i.db.QueryContext(ctx, `
+		SELECT TABLE_NAME
+		FROM INFORMATION_SCHEMA.TABLES
+		WHERE TABLE_SCHEMA = ?
+		ORDER BY TABLE_NAME
+	`, i.schema)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		tables = append(tables, name)
+	}
+	return tables, rows.Err()
+}
+
+func (i *Inspector) FetchSchema(ctx context.Context, tableName string) ([]types.ColumnSpec, error) {
 
 	rows, err := i.db.QueryContext(ctx, `
 		SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE
@@ -65,10 +86,7 @@ func (i *Inspector) FetchSchema(tableName string) ([]types.ColumnSpec, error) {
 	return cols, rows.Err()
 }
 
-func (i *Inspector) FetchRowCount(tableName string) (int64, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), i.timemout)
-	defer cancel()
-
+func (i *Inspector) FetchRowCount(ctx context.Context, tableName string) (int64, error) {
 	var count int64
 	query := fmt.Sprintf("SELECT COUNT(*) FROM `%s`", tableName)
 	err := i.db.QueryRowContext(ctx, query).Scan(&count)
@@ -78,20 +96,17 @@ func (i *Inspector) FetchRowCount(tableName string) (int64, error) {
 	return count, nil
 }
 
-func (i *Inspector) FetchLatestTimestamp(tableName string) (time.Time, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), i.timemout)
-	defer cancel()
-
-	candidates := []string{"updated_at", "created_at", "modified_at"}
-
-	for _, col := range candidates {
-		query := fmt.Sprintf("SELECT MAX(`%s`) FROM `%s`", col, tableName)
-		var ts sql.NullTime
-		err := i.db.QueryRowContext(ctx, query).Scan(&ts)
-		if err != nil && ts.Valid {
-			return ts.Time, nil
-		}
+func (i *Inspector) FetchLatestTimestamp(ctx context.Context, tableName string, column string,) (*time.Time, error) {
+	query := fmt.Sprintf("SELECT MAX(%s) FROM `%s`", column, tableName)
+	var ts sql.NullTime
+	err := i.db.QueryRowContext(ctx, query).Scan(&ts)
+	if err != nil {
+		return nil, err
 	}
 
-	return time.Time{}, nil
+	if !ts.Valid {
+		return nil, nil
+	}
+
+	return &ts.Time, nil
 }
