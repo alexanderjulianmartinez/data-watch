@@ -2,15 +2,10 @@ package drift
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/alexanderjulianmartinez/data-watch/internal/cdc"
 	"github.com/alexanderjulianmartinez/data-watch/internal/source"
-)
-
-const (
-	SeverityInfo  = "INFO"
-	SeverityWarn  = "WARN"
-	SeverityBlock = "BLOCK"
 )
 
 type Issue struct {
@@ -56,80 +51,74 @@ func Validate(
 	}
 
 	// Handle captured tables from CDC
-	for _, tname := range cdcResult.CapturedTables {
-		mysqlTable, ok := mysqlTables[tname]
-		if !ok {
-			report.Issues = append(report.Issues, Issue{
-				Severity: SeverityBlock,
-				Table:    tname,
-				Message:  "Table captured by CDC but missing in MySQL",
-			})
-			continue
-		}
+	if cdcResult != nil {
+		for _, tname := range cdcResult.CapturedTables {
+			mysqlTable, ok := mysqlTables[tname]
+			if !ok {
+				report.Issues = append(report.Issues, Issue{
+					Severity: SeverityBlock,
+					Table:    tname,
+					Message:  "Table captured by CDC but missing in MySQL",
+				})
+				continue
+			}
 
-		// Primary key present?
-		if len(mysqlTable.PrimaryKey) == 0 {
-			report.Issues = append(report.Issues, Issue{
-				Severity: SeverityBlock,
-				Table:    tname,
-				Message:  "Table has no primary key (unsafe for CDC)",
-			})
-		}
+			// Primary key present?
+			if len(mysqlTable.PrimaryKey) == 0 {
+				report.Issues = append(report.Issues, Issue{
+					Severity: SeverityBlock,
+					Table:    tname,
+					Message:  "Table has no primary key (unsafe for CDC)",
+				})
+			}
 
-		// If CDC provided schemas, compare columns and types
-		if cdcResult.TableSchemas != nil {
-			if ctable, ok := cdcResult.TableSchemas[tname]; ok {
-				mysqlCols := getMysqlCols(mysqlTable)
-				// check columns in mysql but not in cdc -> INFO
-				for cname := range mysqlCols {
-					if _, exists := ctable.Columns[cname]; !exists {
-						report.Issues = append(report.Issues, Issue{
-							Severity: SeverityInfo,
-							Table:    tname,
-							Column:   cname,
-							Message:  fmt.Sprintf("%s.%s added", tname, cname),
-						})
-					}
-				}
-				// check columns in cdc but not in mysql -> BLOCK
-				for cname, ccol := range ctable.Columns {
-					if _, exists := mysqlCols[cname]; !exists {
-						report.Issues = append(report.Issues, Issue{
-							Severity: SeverityBlock,
-							Table:    tname,
-							Column:   cname,
-							Message:  fmt.Sprintf("%s.%s present in CDC but missing in MySQL", tname, cname),
-						})
-						continue
-					} else {
-						mcol := mysqlCols[cname]
-						// nullable mismatch -> BLOCK
-						if mcol.Nullable != ccol.Nullable {
-							from := "NOT NULL"
-							to := "NOT NULL"
-							if mcol.Nullable {
-								from = "NULLABLE"
-							}
-							if ccol.Nullable {
-								to = "NULLABLE"
-							}
+			// If CDC provided schemas, compare columns and types
+			if cdcResult.TableSchemas != nil {
+				if ctable, ok := cdcResult.TableSchemas[tname]; ok {
+					mysqlCols := getMysqlCols(mysqlTable)
+					// Column exists in MySQL but not CDC -> INFO (column added)
+					for cname := range mysqlCols {
+						if _, exists := ctable.Columns[cname]; !exists {
 							report.Issues = append(report.Issues, Issue{
-								Severity: SeverityBlock,
+								Severity: SeverityForChange("column_added"),
 								Table:    tname,
 								Column:   cname,
-								Message:  fmt.Sprintf("%s.%s %s -> %s", tname, cname, from, to),
+								Message:  MessageForChange("column_added", tname, cname, "", ""),
 							})
 						}
-						// type mismatch -> WARN
-						if mcol.Type != ccol.Type {
+					}
+					// Column exists in CDC but not in MySQL -> BLOCK (column removed)
+					for cname, ccol := range ctable.Columns {
+						if _, exists := mysqlCols[cname]; !exists {
 							report.Issues = append(report.Issues, Issue{
-								Severity: SeverityWarn,
+								Severity: SeverityForChange("column_removed"),
 								Table:    tname,
 								Column:   cname,
-								FromType: mcol.Type,
-								ToType:   ccol.Type,
-								Message:  fmt.Sprintf("%s.%s type mismatch (%s -> %s)", tname, cname, mcol.Type, ccol.Type),
+								Message:  MessageForChange("column_removed", tname, cname, "", ""),
 							})
+							continue
+						} else {
+							mcol := mysqlCols[cname]
+							// Nullable -> NOT NULL (only this direction) -> BLOCK
+							if mcol.Nullable && !ccol.Nullable {
+								report.Issues = append(report.Issues, Issue{
+									Severity: SeverityForChange("nullable_to_notnull"),
+									Table:    tname,
+									Column:   cname,
+									Message:  fmt.Sprintf("%s.%s %s", tname, cname, MessageForChange("nullable_to_notnull", tname, cname, "", "")),
+								})
+							}
+							// type mismatch -> WARN
+							if !strings.EqualFold(mcol.Type, ccol.Type) {
+								report.Issues = append(report.Issues, Issue{
+									Severity: SeverityForChange("type_changed"),
+									Table:    tname,
+									Column:   cname,
+									FromType: mcol.Type,
+									ToType:   ccol.Type,
+									Message:  fmt.Sprintf("%s.%s %s (%s -> %s)", tname, cname, MessageForChange("type_changed", tname, cname, mcol.Type, ccol.Type), mcol.Type, ccol.Type),
+								})
+							}
 						}
 					}
 				}

@@ -5,6 +5,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 
 	"github.com/alexanderjulianmartinez/data-watch/internal/cdc"
 	"github.com/alexanderjulianmartinez/data-watch/internal/cdc/debezium"
@@ -40,6 +42,7 @@ func run(args []string) error {
 func runCheck(args []string) error {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	configPath := fs.String("config", "", "Path to config.yaml")
+	failOn := fs.String("fail-on", "block", "Severity level that causes a non-zero exit. One of: info,warn,block")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -86,17 +89,7 @@ func runCheck(args []string) error {
 		}
 	}
 
-	// If CDC did not provide table schemas, populate them from MySQL inspection
-	if cdcResult != nil && cdcResult.TableSchemas == nil {
-		cdcResult.TableSchemas = map[string]cdc.TableSchema{}
-		for _, t := range mysqlResult.Tables {
-			cols := map[string]cdc.ColumnInfo{}
-			for _, c := range t.Columns {
-				cols[c.Name] = cdc.ColumnInfo{Type: c.Type, Nullable: c.Nullable}
-			}
-			cdcResult.TableSchemas[t.Name] = cdc.TableSchema{Columns: cols}
-		}
-	}
+	// Do not auto-populate CDC schemas from MySQL. Only use CDC-provided schemas for validation.
 
 	report := drift.Validate(mysqlResult, cdcResult)
 
@@ -107,7 +100,7 @@ func runCheck(args []string) error {
 		// Primary key summary
 		pkProblems := 0
 		for _, iss := range report.Issues {
-			if iss.Severity == drift.SeverityBlock && (iss.Message == "Table has no primary key (unsafe for CDC)" || iss.Message == "Table has no primary key (unsafe for CDC)") {
+			if iss.Severity == drift.SeverityBlock && strings.Contains(iss.Message, "primary key") {
 				pkProblems++
 			}
 		}
@@ -115,45 +108,101 @@ func runCheck(args []string) error {
 			fmt.Println("    Primary Keys match")
 		}
 
-		// Print issues
+		// Group issues by table
+		tblIssues := map[string][]drift.Issue{}
+		sevCount := map[string]int{}
 		for _, iss := range report.Issues {
-			// format message compactly
-			switch iss.Severity {
-			case drift.SeverityInfo:
+			tblIssues[iss.Table] = append(tblIssues[iss.Table], iss)
+			sevCount[iss.Severity]++
+		}
+
+		// Print table-scoped and column-scoped issues (deterministic order)
+		var tables []string
+		for t := range tblIssues {
+			tables = append(tables, t)
+		}
+		sort.Strings(tables)
+		for _, t := range tables {
+			fmt.Printf("    Table: %s\n", t)
+			// print table-level issues first
+			for _, iss := range tblIssues[t] {
+				if iss.Column == "" {
+					fmt.Printf("      - [%s] %s\n", iss.Severity, iss.Message)
+				}
+			}
+			// collect column-scoped issues
+			colMap := map[string][]drift.Issue{}
+			for _, iss := range tblIssues[t] {
 				if iss.Column != "" {
-					// e.g., user.nickname added
-					fmt.Printf("    %s.%s added\n", iss.Table, iss.Column)
-				} else {
-					fmt.Printf("    %s\n", iss.Message)
+					colMap[iss.Column] = append(colMap[iss.Column], iss)
 				}
-			case drift.SeverityWarn:
-				if iss.Column != "" {
-					fmt.Printf("    %s.%s type mismatch (%s -> %s)\n", iss.Table, iss.Column, iss.FromType, iss.ToType)
-				} else {
-					fmt.Printf("    %s\n", iss.Message)
+			}
+			var cols []string
+			for c := range colMap {
+				cols = append(cols, c)
+			}
+			sort.Strings(cols)
+			for _, c := range cols {
+				for _, iss := range colMap[c] {
+					msg := iss.Message
+					if iss.FromType != "" || iss.ToType != "" {
+						msg = fmt.Sprintf("%s (%s -> %s)", msg, iss.FromType, iss.ToType)
+					}
+					fmt.Printf("      - [%s] %s.%s %s\n", iss.Severity, iss.Table, iss.Column, msg)
 				}
-			case drift.SeverityBlock:
-				if iss.Column != "" && (iss.FromType != "" || iss.ToType != "") {
-					// type or similar
-					fmt.Printf("    %s.%s %s\n", iss.Table, iss.Column, iss.Message)
-				} else if iss.Column != "" {
-					fmt.Printf("    %s.%s %s\n", iss.Table, iss.Column, iss.Message)
-				} else {
-					fmt.Printf("    %s %s\n", iss.Table, iss.Message)
-				}
-			default:
-				fmt.Printf("    %s\n", iss.Message)
 			}
 		}
 
-		// Final line if any BLOCK
-		blocks := report.BlockingCount()
-		if blocks > 0 {
+		// Summary
+		info := sevCount[drift.SeverityInfo]
+		warn := sevCount[drift.SeverityWarn]
+		block := sevCount[drift.SeverityBlock]
+		fmt.Printf("\nSummary: %d INFO / %d WARN / %d BLOCK\n", info, warn, block)
+		if block > 0 {
 			suffix := "s"
-			if blocks == 1 {
+			if block == 1 {
 				suffix = ""
 			}
-			fmt.Printf("\nResult: FAILED (%d blocking issue%s)\n", blocks, suffix)
+			fmt.Printf("Result: FAILED (%d blocking issue%s)\n", block, suffix)
+		}
+
+		// Decide exit code based on highest detected severity and --fail-on
+		// Mapping: 0 = none/INFO, 1 = WARN, 2 = BLOCK
+		highest := 0
+		for _, iss := range report.Issues {
+			switch iss.Severity {
+			case drift.SeverityBlock:
+				highest = 2
+				break
+			case drift.SeverityWarn:
+				if highest < 1 {
+					highest = 1
+				}
+			}
+			if highest == 2 {
+				break
+			}
+		}
+
+		// Parse fail-on flag
+		failOnRank := func(s string) int {
+			s = strings.ToLower(strings.TrimSpace(s))
+			switch s {
+			case "info":
+				return 0
+			case "warn":
+				return 1
+			case "block":
+				return 2
+			default:
+				// invalid value -> default to block
+				return 2
+			}
+		}(*failOn)
+
+		// If highest severity meets or exceeds the fail-on threshold, exit with that code.
+		if highest >= failOnRank && highest > 0 {
+			os.Exit(highest)
 		}
 	}
 	return nil
