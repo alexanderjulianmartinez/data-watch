@@ -1,8 +1,14 @@
 package source
 
+type ColumnInfo struct {
+	Name     string
+	Type     string
+	Nullable bool
+}
+
 type TableInfo struct {
 	Name       string
-	Columns    []string
+	Columns    []ColumnInfo
 	PrimaryKey []string
 	RowCount   int64
 }

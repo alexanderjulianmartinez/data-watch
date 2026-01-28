@@ -29,23 +29,19 @@ func (i *Inspector) Inspect(ctx context.Context) (*source.InspectionResult, erro
 			return nil, err
 		}
 
-		// Extract column names and look for timestamp column
-		var columnNames []string
-		var timestampColumn *string
+		// Build columns with type and nullable info
+		var columns []source.ColumnInfo
 		for _, col := range schema {
-			columnNames = append(columnNames, col.Name)
-			// Check for common timestamp column names
-			if col.Name == "updated_at" || col.Name == "created_at" || col.Name == "modified_at" {
-				if timestampColumn == nil {
-					columnNames := col.Name
-					timestampColumn = &columnNames
-				}
-			}
+			columns = append(columns, source.ColumnInfo{
+				Name:     col.Name,
+				Type:     col.Type,
+				Nullable: col.Nullable,
+			})
 		}
 
 		results = append(results, source.TableInfo{
 			Name:       tableName,
-			Columns:    columnNames,
+			Columns:    columns,
 			PrimaryKey: primaryKey,
 			RowCount:   rowCount,
 		})

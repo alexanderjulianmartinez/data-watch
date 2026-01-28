@@ -86,13 +86,74 @@ func runCheck(args []string) error {
 		}
 	}
 
+	// If CDC did not provide table schemas, populate them from MySQL inspection
+	if cdcResult != nil && cdcResult.TableSchemas == nil {
+		cdcResult.TableSchemas = map[string]cdc.TableSchema{}
+		for _, t := range mysqlResult.Tables {
+			cols := map[string]cdc.ColumnInfo{}
+			for _, c := range t.Columns {
+				cols[c.Name] = cdc.ColumnInfo{Type: c.Type, Nullable: c.Nullable}
+			}
+			cdcResult.TableSchemas[t.Name] = cdc.TableSchema{Columns: cols}
+		}
+	}
+
 	report := drift.Validate(mysqlResult, cdcResult)
+
+	fmt.Println("\nDrift Check:")
 	if len(report.Issues) == 0 {
-		fmt.Println("\nDrift Check: OK")
+		fmt.Println("    No drift detected")
 	} else {
-		fmt.Println("\nDrift Issues:")
-		for _, issue := range report.Issues {
-			fmt.Printf("  - %s\n", issue)
+		// Primary key summary
+		pkProblems := 0
+		for _, iss := range report.Issues {
+			if iss.Severity == drift.SeverityBlock && (iss.Message == "Table has no primary key (unsafe for CDC)" || iss.Message == "Table has no primary key (unsafe for CDC)") {
+				pkProblems++
+			}
+		}
+		if pkProblems == 0 {
+			fmt.Println("    Primary Keys match")
+		}
+
+		// Print issues
+		for _, iss := range report.Issues {
+			// format message compactly
+			switch iss.Severity {
+			case drift.SeverityInfo:
+				if iss.Column != "" {
+					// e.g., user.nickname added
+					fmt.Printf("    %s.%s added\n", iss.Table, iss.Column)
+				} else {
+					fmt.Printf("    %s\n", iss.Message)
+				}
+			case drift.SeverityWarn:
+				if iss.Column != "" {
+					fmt.Printf("    %s.%s type mismatch (%s -> %s)\n", iss.Table, iss.Column, iss.FromType, iss.ToType)
+				} else {
+					fmt.Printf("    %s\n", iss.Message)
+				}
+			case drift.SeverityBlock:
+				if iss.Column != "" && (iss.FromType != "" || iss.ToType != "") {
+					// type or similar
+					fmt.Printf("    %s.%s %s\n", iss.Table, iss.Column, iss.Message)
+				} else if iss.Column != "" {
+					fmt.Printf("    %s.%s %s\n", iss.Table, iss.Column, iss.Message)
+				} else {
+					fmt.Printf("    %s %s\n", iss.Table, iss.Message)
+				}
+			default:
+				fmt.Printf("    %s\n", iss.Message)
+			}
+		}
+
+		// Final line if any BLOCK
+		blocks := report.BlockingCount()
+		if blocks > 0 {
+			suffix := "s"
+			if blocks == 1 {
+				suffix = ""
+			}
+			fmt.Printf("\nResult: FAILED (%d blocking issue%s)\n", blocks, suffix)
 		}
 	}
 	return nil
