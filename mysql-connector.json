@@ -1,0 +1,17 @@
+{
+    "name": "mysql-testdb",
+    "config": {
+        "connector.class": "io.debezium.connector.mysql.MySqlConnector",
+        "database.hostname": "mysql",
+        "database.port": "3306",
+        "database.user": "datawatch",
+        "database.password": "datapass",
+        "database.server.id": "184054",
+        "database.server.name": "dbserver1",
+        "database.include.list": "testdb",
+        "topic.prefix": "data-watch",
+        "table.include.list": "testdb.orders,testdb.users",
+        "database.history.kafka.bootstrap.servers": "kafka:9092",
+        "database.history.kafka.topic": "schema-changes.testdb"
+    }
+}
