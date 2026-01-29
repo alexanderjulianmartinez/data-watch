@@ -77,29 +77,72 @@ func runCheck(args []string) error {
 		fmt.Printf("  Row count: %d\n", table.RowCount)
 	}
 
-	var cdcResult *cdc.Result
+	// Collect per-connector CDC inspection results (if supported)
+	var connectorResults []*cdc.ConnectorResult
 	if cfg.CDC.Type == "debezium" {
 		inspector := debezium.New(cfg.CDC)
-		cdcResult, err = inspector.Inspect(context.Background())
-		if err != nil {
-			return err
-		}
-		fmt.Println("\nCDC:", inspector.Name())
-		fmt.Println("  Connector reachable:", cdcResult.ConnectorReachable)
-		if len(cdcResult.CapturedTables) > 0 {
-			fmt.Println("  CDC Tables:", cdcResult.CapturedTables)
-		}
-		if len(cdcResult.Warnings) > 0 {
-			fmt.Println("  Warnings:")
-			for _, w := range cdcResult.Warnings {
-				fmt.Printf("    - %s\n", w)
+		// Prefer InspectConnectors when available
+		if multi, ok := (interface{}(inspector)).(interface {
+			InspectConnectors(context.Context) ([]*cdc.ConnectorResult, error)
+		}); ok {
+			connectorResults, err = multi.InspectConnectors(context.Background())
+			if err != nil {
+				return err
+			}
+			fmt.Println("\nCDC:", inspector.Name())
+			for _, cr := range connectorResults {
+				fmt.Printf("  Connector: %s\n", cr.Name)
+				fmt.Printf("    Connector reachable: %v\n", cr.Result.ConnectorReachable)
+				if len(cr.Result.CapturedTables) > 0 {
+					fmt.Printf("    CDC Tables: %v\n", cr.Result.CapturedTables)
+				}
+				if len(cr.Result.Warnings) > 0 {
+					fmt.Println("    Warnings:")
+					for _, w := range cr.Result.Warnings {
+						fmt.Printf("      - %s\n", w)
+					}
+				}
+			}
+		} else {
+			// Fallback to legacy aggregated Inspect
+			single, err := inspector.Inspect(context.Background())
+			if err != nil {
+				return err
+			}
+			connectorResults = []*cdc.ConnectorResult{{Name: "", Result: single}}
+			fmt.Println("\nCDC:", inspector.Name())
+			fmt.Println("  Connector reachable:", single.ConnectorReachable)
+			if len(single.CapturedTables) > 0 {
+				fmt.Println("  CDC Tables:", single.CapturedTables)
+			}
+			if len(single.Warnings) > 0 {
+				fmt.Println("  Warnings:")
+				for _, w := range single.Warnings {
+					fmt.Printf("    - %s\n", w)
+				}
 			}
 		}
 	}
 
 	// Do not auto-populate CDC schemas from MySQL. Only use CDC-provided schemas for validation.
 
-	report := drift.Validate(mysqlResult, cdcResult)
+	// Validate per-connector and aggregate issues for summary
+	reportsByConnector := map[string]*drift.Report{}
+	overallIssues := []drift.Issue{}
+	if len(connectorResults) == 0 {
+		// No CDC connectors detected; validate with nil CDC result
+		rep := drift.Validate(mysqlResult, nil)
+		reportsByConnector[""] = rep
+		overallIssues = append(overallIssues, rep.Issues...)
+	} else {
+		for _, cr := range connectorResults {
+			rep := drift.Validate(mysqlResult, cr.Result)
+			reportsByConnector[cr.Name] = rep
+			overallIssues = append(overallIssues, rep.Issues...)
+		}
+	}
+	// Combined report for backwards compatibility
+	report := &drift.Report{Issues: overallIssues}
 
 	// Compute highest severity (0=info/none,1=warn,2=block)
 	highest := 0
@@ -135,30 +178,54 @@ func runCheck(args []string) error {
 
 	// If JSON is requested, emit structured output and exit according to --fail-on
 	if strings.ToLower(strings.TrimSpace(*format)) == "json" {
+		// Build per-connector JSON structure
+		type connectorOut struct {
+			Name    string        `json:"name"`
+			CDC     *cdc.Result   `json:"cdc,omitempty"`
+			Drift   *drift.Report `json:"drift,omitempty"`
+			Summary struct {
+				Info  int `json:"info"`
+				Warn  int `json:"warn"`
+				Block int `json:"block"`
+			} `json:"summary"`
+		}
 		out := struct {
-			MySQLResult interface{}   `json:"mysql"`
-			CDC         *cdc.Result   `json:"cdc,omitempty"`
-			Drift       *drift.Report `json:"drift"`
-			Summary     struct {
+			MySQL      interface{}    `json:"mysql"`
+			Connectors []connectorOut `json:"connectors"`
+			Summary    struct {
 				Info  int `json:"info"`
 				Warn  int `json:"warn"`
 				Block int `json:"block"`
 			} `json:"summary"`
 		}{
-			MySQLResult: mysqlResult,
-			CDC:         cdcResult,
-			Drift:       report,
+			MySQL: mysqlResult,
 		}
-		// Populate summary counts
-		for _, iss := range report.Issues {
-			switch iss.Severity {
-			case drift.SeverityBlock:
-				out.Summary.Block++
-			case drift.SeverityWarn:
-				out.Summary.Warn++
-			case drift.SeverityInfo:
-				out.Summary.Info++
+
+		// populate connectors
+		for name, rep := range reportsByConnector {
+			c := connectorOut{Name: name}
+			// find matching cdc result
+			for _, cr := range connectorResults {
+				if cr.Name == name {
+					c.CDC = cr.Result
+					break
+				}
 			}
+			c.Drift = rep
+			for _, iss := range rep.Issues {
+				switch iss.Severity {
+				case drift.SeverityBlock:
+					c.Summary.Block++
+				case drift.SeverityWarn:
+					c.Summary.Warn++
+				case drift.SeverityInfo:
+					c.Summary.Info++
+				}
+			}
+			out.Connectors = append(out.Connectors, c)
+			out.Summary.Block += c.Summary.Block
+			out.Summary.Warn += c.Summary.Warn
+			out.Summary.Info += c.Summary.Info
 		}
 
 		b, err := json.MarshalIndent(out, "", "  ")
@@ -174,76 +241,171 @@ func runCheck(args []string) error {
 
 	// Human-readable output (default)
 	fmt.Println("\nDrift Check:")
-	if len(report.Issues) == 0 {
-		fmt.Println("    No drift detected")
-	} else {
-		// Primary key summary
-		pkProblems := 0
-		for _, iss := range report.Issues {
-			if iss.Severity == drift.SeverityBlock && strings.Contains(iss.Message, "primary key") {
-				pkProblems++
+	// If we have per-connector reports, print each connector's drift separately.
+	if len(reportsByConnector) > 0 && len(connectorResults) > 0 {
+		for _, cr := range connectorResults {
+			name := cr.Name
+			rep := reportsByConnector[name]
+			if rep == nil {
+				continue
 			}
-		}
-		if pkProblems == 0 {
-			fmt.Println("    Primary Keys match")
-		}
+			fmt.Printf("  Connector: %s\n", name)
+			if len(rep.Issues) == 0 {
+				fmt.Println("    No drift detected")
+				continue
+			}
 
-		// Group issues by table
-		tblIssues := map[string][]drift.Issue{}
-		sevCount := map[string]int{}
-		for _, iss := range report.Issues {
-			tblIssues[iss.Table] = append(tblIssues[iss.Table], iss)
-			sevCount[iss.Severity]++
-		}
-
-		// Print table-scoped and column-scoped issues (deterministic order)
-		var tables []string
-		for t := range tblIssues {
-			tables = append(tables, t)
-		}
-		sort.Strings(tables)
-		for _, t := range tables {
-			fmt.Printf("    Table: %s\n", t)
-			// print table-level issues first
-			for _, iss := range tblIssues[t] {
-				if iss.Column == "" {
-					fmt.Printf("      - [%s] %s\n", iss.Severity, iss.Message)
+			// Primary key summary for this connector
+			pkProblems := 0
+			for _, iss := range rep.Issues {
+				if iss.Severity == drift.SeverityBlock && strings.Contains(iss.Message, "primary key") {
+					pkProblems++
 				}
 			}
-			// collect column-scoped issues
-			colMap := map[string][]drift.Issue{}
-			for _, iss := range tblIssues[t] {
-				if iss.Column != "" {
-					colMap[iss.Column] = append(colMap[iss.Column], iss)
+			if pkProblems == 0 {
+				fmt.Println("    Primary Keys match")
+			}
+
+			// Group issues by table
+			tblIssues := map[string][]drift.Issue{}
+			sevCount := map[string]int{}
+			for _, iss := range rep.Issues {
+				tblIssues[iss.Table] = append(tblIssues[iss.Table], iss)
+				sevCount[iss.Severity]++
+			}
+
+			// Print issues by table (deterministic order)
+			var tables []string
+			for t := range tblIssues {
+				tables = append(tables, t)
+			}
+			sort.Strings(tables)
+			for _, t := range tables {
+				if t == "" {
+					fmt.Println("    Connector-level issues:")
+				} else {
+					fmt.Printf("    Table: %s\n", t)
 				}
-			}
-			var cols []string
-			for c := range colMap {
-				cols = append(cols, c)
-			}
-			sort.Strings(cols)
-			for _, c := range cols {
-				for _, iss := range colMap[c] {
-					msg := iss.Message
-					if iss.FromType != "" || iss.ToType != "" {
-						msg = fmt.Sprintf("%s (%s -> %s)", msg, iss.FromType, iss.ToType)
+				// print table-level issues first
+				for _, iss := range tblIssues[t] {
+					if iss.Column == "" {
+						if t == "" {
+							fmt.Printf("      - [%s] %s\n", iss.Severity, iss.Message)
+						} else {
+							fmt.Printf("      - [%s] %s\n", iss.Severity, iss.Message)
+						}
 					}
-					fmt.Printf("      - [%s] %s.%s %s\n", iss.Severity, iss.Table, iss.Column, msg)
+				}
+				// collect column-scoped issues
+				colMap := map[string][]drift.Issue{}
+				for _, iss := range tblIssues[t] {
+					if iss.Column != "" {
+						colMap[iss.Column] = append(colMap[iss.Column], iss)
+					}
+				}
+				var cols []string
+				for c := range colMap {
+					cols = append(cols, c)
+				}
+				sort.Strings(cols)
+				for _, c := range cols {
+					for _, iss := range colMap[c] {
+						msg := iss.Message
+						if iss.FromType != "" || iss.ToType != "" {
+							msg = fmt.Sprintf("%s (%s -> %s)", msg, iss.FromType, iss.ToType)
+						}
+						fmt.Printf("      - [%s] %s.%s %s\n", iss.Severity, iss.Table, iss.Column, msg)
+					}
 				}
 			}
-		}
 
-		// Summary
-		info := sevCount[drift.SeverityInfo]
-		warn := sevCount[drift.SeverityWarn]
-		block := sevCount[drift.SeverityBlock]
-		fmt.Printf("\nSummary: %d INFO / %d WARN / %d BLOCK\n", info, warn, block)
-		if block > 0 {
-			suffix := "s"
-			if block == 1 {
-				suffix = ""
+			// Connector summary
+			info := sevCount[drift.SeverityInfo]
+			warn := sevCount[drift.SeverityWarn]
+			block := sevCount[drift.SeverityBlock]
+			fmt.Printf("\n    Summary: %d INFO / %d WARN / %d BLOCK\n", info, warn, block)
+			if block > 0 {
+				suffix := "s"
+				if block == 1 {
+					suffix = ""
+				}
+				fmt.Printf("    Result: FAILED (%d blocking issue%s)\n", block, suffix)
 			}
-			fmt.Printf("Result: FAILED (%d blocking issue%s)\n", block, suffix)
+			fmt.Println()
+		}
+	} else {
+		// Legacy single combined report
+		if len(report.Issues) == 0 {
+			fmt.Println("    No drift detected")
+		} else {
+			// Primary key summary
+			pkProblems := 0
+			for _, iss := range report.Issues {
+				if iss.Severity == drift.SeverityBlock && strings.Contains(iss.Message, "primary key") {
+					pkProblems++
+				}
+			}
+			if pkProblems == 0 {
+				fmt.Println("    Primary Keys match")
+			}
+
+			// Group issues by table
+			tblIssues := map[string][]drift.Issue{}
+			sevCount := map[string]int{}
+			for _, iss := range report.Issues {
+				tblIssues[iss.Table] = append(tblIssues[iss.Table], iss)
+				sevCount[iss.Severity]++
+			}
+
+			// Print table-scoped and column-scoped issues (deterministic order)
+			var tables []string
+			for t := range tblIssues {
+				tables = append(tables, t)
+			}
+			sort.Strings(tables)
+			for _, t := range tables {
+				fmt.Printf("    Table: %s\n", t)
+				// print table-level issues first
+				for _, iss := range tblIssues[t] {
+					if iss.Column == "" {
+						fmt.Printf("      - [%s] %s\n", iss.Severity, iss.Message)
+					}
+				}
+				// collect column-scoped issues
+				colMap := map[string][]drift.Issue{}
+				for _, iss := range tblIssues[t] {
+					if iss.Column != "" {
+						colMap[iss.Column] = append(colMap[iss.Column], iss)
+					}
+				}
+				var cols []string
+				for c := range colMap {
+					cols = append(cols, c)
+				}
+				sort.Strings(cols)
+				for _, c := range cols {
+					for _, iss := range colMap[c] {
+						msg := iss.Message
+						if iss.FromType != "" || iss.ToType != "" {
+							msg = fmt.Sprintf("%s (%s -> %s)", msg, iss.FromType, iss.ToType)
+						}
+						fmt.Printf("      - [%s] %s.%s %s\n", iss.Severity, iss.Table, iss.Column, msg)
+					}
+				}
+			}
+
+			// Summary
+			info := sevCount[drift.SeverityInfo]
+			warn := sevCount[drift.SeverityWarn]
+			block := sevCount[drift.SeverityBlock]
+			fmt.Printf("\nSummary: %d INFO / %d WARN / %d BLOCK\n", info, warn, block)
+			if block > 0 {
+				suffix := "s"
+				if block == 1 {
+					suffix = ""
+				}
+				fmt.Printf("Result: FAILED (%d blocking issue%s)\n", block, suffix)
+			}
 		}
 	}
 

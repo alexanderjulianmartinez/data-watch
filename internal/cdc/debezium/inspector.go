@@ -32,6 +32,51 @@ func (i *Inspector) Name() string {
 }
 
 func (i *Inspector) Inspect(ctx context.Context) (*cdc.Result, error) {
+	// Delegate to InspectConnectors and aggregate for backward compatibility
+	crs, err := i.InspectConnectors(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// Aggregate
+	var capturedTables []string
+	tableSchemas := map[string]cdc.TableSchema{}
+	schemaTimes := map[string]time.Time{}
+	var warnings []string
+	reachable := false
+	for _, cr := range crs {
+		if cr.Result != nil {
+			reachable = reachable || cr.Result.ConnectorReachable
+			capturedTables = append(capturedTables, cr.Result.CapturedTables...)
+			if cr.Result.TableSchemas != nil {
+				for k, v := range cr.Result.TableSchemas {
+					tableSchemas[k] = v
+				}
+			}
+			if cr.Result.SchemaTimestamps != nil {
+				for k, v := range cr.Result.SchemaTimestamps {
+					schemaTimes[k] = v
+				}
+			}
+			if len(cr.Result.Warnings) > 0 {
+				warnings = append(warnings, cr.Result.Warnings...)
+			}
+		}
+	}
+	res := &cdc.Result{ConnectorReachable: reachable, CapturedTables: capturedTables}
+	if len(tableSchemas) > 0 {
+		res.TableSchemas = tableSchemas
+	}
+	if len(schemaTimes) > 0 {
+		res.SchemaTimestamps = schemaTimes
+	}
+	if len(warnings) > 0 {
+		res.Warnings = warnings
+	}
+	return res, nil
+}
+
+// InspectConnectors performs inspection per connector and returns a slice of ConnectorResult.
+func (i *Inspector) InspectConnectors(ctx context.Context) ([]*cdc.ConnectorResult, error) {
 	client := &http.Client{Timeout: 5 * time.Second}
 
 	url := fmt.Sprintf("%s/connectors/", i.cfg.ConnectURL)
@@ -39,10 +84,8 @@ func (i *Inspector) Inspect(ctx context.Context) (*cdc.Result, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return &cdc.Result{
-			ConnectorReachable: false,
-			Warnings:           []string{err.Error()},
-		}, nil
+		// Return a single entry indicating unreachable
+		return []*cdc.ConnectorResult{{Name: "", Result: &cdc.Result{ConnectorReachable: false, Warnings: []string{err.Error()}}}}, nil
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -54,41 +97,40 @@ func (i *Inspector) Inspect(ctx context.Context) (*cdc.Result, error) {
 		return nil, err
 	}
 
-	// Extract actual table names from connector configurations
-	var capturedTables []string
-	var tableSchemas map[string]cdc.TableSchema
-	var schemaTimes map[string]time.Time
-	var warnings []string
+	var results []*cdc.ConnectorResult
 	for _, connector := range connectors {
+		cr := &cdc.ConnectorResult{Name: connector, Result: &cdc.Result{ConnectorReachable: true}}
+
 		configURL := fmt.Sprintf("%s/connectors/%s", i.cfg.ConnectURL, connector)
 		configReq, err := http.NewRequestWithContext(ctx, http.MethodGet, configURL, nil)
 		if err != nil {
+			results = append(results, cr)
 			continue
 		}
 
 		configResp, err := client.Do(configReq)
 		if err != nil {
+			results = append(results, cr)
 			continue
 		}
 		defer configResp.Body.Close()
 
 		var connConfig ConnectorConfig
 		if err := json.NewDecoder(configResp.Body).Decode(&connConfig); err != nil {
+			results = append(results, cr)
 			continue
 		}
 
 		// Extract table.include.list from config
 		if tableList, ok := connConfig.Config["table.include.list"]; ok {
 			if tableListStr, ok := tableList.(string); ok {
-				// Split by comma and extract just the table names (remove schema prefix if present)
 				tables := strings.Split(tableListStr, ",")
 				for _, table := range tables {
 					table = strings.TrimSpace(table)
-					// Extract table name from "schema.table" format
 					if parts := strings.Split(table, "."); len(parts) == 2 {
-						capturedTables = append(capturedTables, parts[1])
+						cr.Result.CapturedTables = append(cr.Result.CapturedTables, parts[1])
 					} else {
-						capturedTables = append(capturedTables, table)
+						cr.Result.CapturedTables = append(cr.Result.CapturedTables, table)
 					}
 				}
 			}
@@ -98,17 +140,13 @@ func (i *Inspector) Inspect(ctx context.Context) (*cdc.Result, error) {
 		if sm, ok := connConfig.Config["snapshot.mode"]; ok {
 			if smStr, ok := sm.(string); ok {
 				smVal := strings.ToLower(strings.TrimSpace(smStr))
-				// snapshot modes that would prevent a full initial snapshot
 				if smVal == "never" || smVal == "none" || smVal == "schema_only" || smVal == "schema_only_recovery" || smVal == "off" {
-					if warnings == nil {
-						warnings = []string{}
-					}
-					warnings = append(warnings, fmt.Sprintf("Connector %s has snapshot.mode=%s; snapshots disabled or schema-only (CDC may miss initial data). This check will not attempt to trigger snapshots.", connector, smVal))
+					cr.Result.Warnings = append(cr.Result.Warnings, fmt.Sprintf("Connector %s has snapshot.mode=%s; snapshots disabled or schema-only (CDC may miss initial data). This check will not attempt to trigger snapshots.", connector, smVal))
 				}
 			}
 		}
 
-		// Fetch connector status (read-only) to detect failed tasks and restart loops
+		// Fetch connector status
 		statusURL := fmt.Sprintf("%s/connectors/%s/status", i.cfg.ConnectURL, connector)
 		statusReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, statusURL, nil)
 		if statusReq != nil {
@@ -136,14 +174,14 @@ func (i *Inspector) Inspect(ctx context.Context) (*cdc.Result, error) {
 							}
 						}
 						healthMsg := fmt.Sprintf("Connector %s health: connector=%s tasks=[%s]", connector, status.Connector.State, strings.Join(taskSummaries, ","))
-						warnings = append(warnings, healthMsg)
+						cr.Result.Warnings = append(cr.Result.Warnings, healthMsg)
 						if strings.ToUpper(status.Connector.State) != "RUNNING" {
-							warnings = append(warnings, fmt.Sprintf("Connector %s state=%s", connector, status.Connector.State))
+							cr.Result.Warnings = append(cr.Result.Warnings, fmt.Sprintf("Connector %s state=%s", connector, status.Connector.State))
 						}
 						if len(failedTasks) > 0 {
-							warnings = append(warnings, fmt.Sprintf("Connector %s has failed task(s): %v", connector, failedTasks))
+							cr.Result.Warnings = append(cr.Result.Warnings, fmt.Sprintf("Connector %s has failed task(s): %v", connector, failedTasks))
 							if strings.ToUpper(status.Connector.State) == "RUNNING" {
-								warnings = append(warnings, fmt.Sprintf("Connector %s may be in restart loop: connector RUNNING but tasks failing", connector))
+								cr.Result.Warnings = append(cr.Result.Warnings, fmt.Sprintf("Connector %s may be in restart loop: connector RUNNING but tasks failing", connector))
 							}
 						}
 					}
@@ -151,25 +189,24 @@ func (i *Inspector) Inspect(ctx context.Context) (*cdc.Result, error) {
 			}
 		}
 
-		// If this connector config points at a Kafka history topic, try to fetch schema changes
+		// Kafka history parsing
 		if topic, ok := connConfig.Config["database.history.kafka.topic"]; ok {
 			if topicStr, ok := topic.(string); ok {
 				if brokers, ok := connConfig.Config["database.history.kafka.bootstrap.servers"]; ok {
 					if brokersStr, ok := brokers.(string); ok {
-						// try to fetch schemas and timestamps from kafka history (best effort)
 						schemas, times, err := fetchSchemasFromKafka(ctx, brokersStr, topicStr)
 						if err == nil {
+							if cr.Result.TableSchemas == nil {
+								cr.Result.TableSchemas = map[string]cdc.TableSchema{}
+							}
+							if cr.Result.SchemaTimestamps == nil {
+								cr.Result.SchemaTimestamps = map[string]time.Time{}
+							}
 							for t, cols := range schemas {
-								capturedTables = append(capturedTables, t)
-								if tableSchemas == nil {
-									tableSchemas = map[string]cdc.TableSchema{}
-								}
-								tableSchemas[t] = cdc.TableSchema{Columns: cols}
-								if schemaTimes == nil {
-									schemaTimes = map[string]time.Time{}
-								}
+								cr.Result.CapturedTables = append(cr.Result.CapturedTables, t)
+								cr.Result.TableSchemas[t] = cdc.TableSchema{Columns: cols}
 								if ts, ok := times[t]; ok {
-									schemaTimes[t] = ts
+									cr.Result.SchemaTimestamps[t] = ts
 								}
 							}
 						}
@@ -178,27 +215,10 @@ func (i *Inspector) Inspect(ctx context.Context) (*cdc.Result, error) {
 			}
 		}
 
+		results = append(results, cr)
 	}
 
-	res := &cdc.Result{
-		ConnectorReachable: true,
-		CapturedTables:     capturedTables,
-	}
-	if tableSchemas != nil {
-		res.TableSchemas = tableSchemas
-	}
-	if schemaTimes != nil {
-		if res.SchemaTimestamps == nil {
-			res.SchemaTimestamps = map[string]time.Time{}
-		}
-		for k, v := range schemaTimes {
-			res.SchemaTimestamps[k] = v
-		}
-	}
-	if len(warnings) > 0 {
-		res.Warnings = warnings
-	}
-	return res, nil
+	return results, nil
 }
 
 // fetchSchemasFromKafka attempts to read recent messages from the given Kafka topic and

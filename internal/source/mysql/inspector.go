@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/alexanderjulianmartinez/data-watch/pkg/types"
@@ -123,17 +124,55 @@ func (i *Inspector) FetchRowCount(ctx context.Context, tableName string) (int64,
 // UPDATE_TIME if available, otherwise falls back to CREATE_TIME. Returns nil if
 // neither is available.
 func (i *Inspector) FetchTableDDLTime(ctx context.Context, tableName string) (*time.Time, error) {
-	var createTime sql.NullTime
-	var updateTime sql.NullTime
 	query := `SELECT CREATE_TIME, UPDATE_TIME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? LIMIT 1`
-	if err := i.db.QueryRowContext(ctx, query, i.schema, tableName).Scan(&createTime, &updateTime); err != nil {
+	var createVal interface{}
+	var updateVal interface{}
+	if err := i.db.QueryRowContext(ctx, query, i.schema, tableName).Scan(&createVal, &updateVal); err != nil {
 		return nil, err
 	}
-	if updateTime.Valid {
-		return &updateTime.Time, nil
+
+	parse := func(v interface{}) (*time.Time, error) {
+		if v == nil {
+			return nil, nil
+		}
+		switch tv := v.(type) {
+		case time.Time:
+			t := tv.UTC()
+			return &t, nil
+		case []byte:
+			s := string(tv)
+			return parseTimeString(s)
+		case string:
+			return parseTimeString(tv)
+		default:
+			return nil, nil
+		}
 	}
-	if createTime.Valid {
-		return &createTime.Time, nil
+
+	if t, err := parse(updateVal); err == nil && t != nil {
+		return t, nil
+	}
+	if t, err := parse(createVal); err == nil && t != nil {
+		return t, nil
+	}
+	return nil, nil
+}
+
+func parseTimeString(s string) (*time.Time, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, nil
+	}
+	// try common MySQL DATETIME format
+	layouts := []string{
+		"2006-01-02 15:04:05",
+		time.RFC3339,
+		"2006-01-02",
+	}
+	for _, l := range layouts {
+		if t, err := time.ParseInLocation(l, s, time.UTC); err == nil {
+			return &t, nil
+		}
 	}
 	return nil, nil
 }
