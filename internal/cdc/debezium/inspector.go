@@ -57,6 +57,8 @@ func (i *Inspector) Inspect(ctx context.Context) (*cdc.Result, error) {
 	// Extract actual table names from connector configurations
 	var capturedTables []string
 	var tableSchemas map[string]cdc.TableSchema
+	var schemaTimes map[string]time.Time
+	var warnings []string
 	for _, connector := range connectors {
 		configURL := fmt.Sprintf("%s/connectors/%s", i.cfg.ConnectURL, connector)
 		configReq, err := http.NewRequestWithContext(ctx, http.MethodGet, configURL, nil)
@@ -92,13 +94,70 @@ func (i *Inspector) Inspect(ctx context.Context) (*cdc.Result, error) {
 			}
 		}
 
+		// Validate snapshot.mode for this connector and warn if disabled or schema-only
+		if sm, ok := connConfig.Config["snapshot.mode"]; ok {
+			if smStr, ok := sm.(string); ok {
+				smVal := strings.ToLower(strings.TrimSpace(smStr))
+				// snapshot modes that would prevent a full initial snapshot
+				if smVal == "never" || smVal == "none" || smVal == "schema_only" || smVal == "schema_only_recovery" || smVal == "off" {
+					if warnings == nil {
+						warnings = []string{}
+					}
+					warnings = append(warnings, fmt.Sprintf("Connector %s has snapshot.mode=%s; snapshots disabled or schema-only (CDC may miss initial data). This check will not attempt to trigger snapshots.", connector, smVal))
+				}
+			}
+		}
+
+		// Fetch connector status (read-only) to detect failed tasks and restart loops
+		statusURL := fmt.Sprintf("%s/connectors/%s/status", i.cfg.ConnectURL, connector)
+		statusReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, statusURL, nil)
+		if statusReq != nil {
+			statusResp, err := client.Do(statusReq)
+			if err == nil {
+				defer statusResp.Body.Close()
+				if statusResp.StatusCode == http.StatusOK {
+					var status struct {
+						Connector struct {
+							State    string `json:"state"`
+							WorkerID string `json:"worker_id"`
+						} `json:"connector"`
+						Tasks []struct {
+							ID    int    `json:"id"`
+							State string `json:"state"`
+						} `json:"tasks"`
+					}
+					if err := json.NewDecoder(statusResp.Body).Decode(&status); err == nil {
+						var taskSummaries []string
+						var failedTasks []int
+						for _, t := range status.Tasks {
+							taskSummaries = append(taskSummaries, fmt.Sprintf("%d:%s", t.ID, t.State))
+							if strings.ToUpper(t.State) != "RUNNING" {
+								failedTasks = append(failedTasks, t.ID)
+							}
+						}
+						healthMsg := fmt.Sprintf("Connector %s health: connector=%s tasks=[%s]", connector, status.Connector.State, strings.Join(taskSummaries, ","))
+						warnings = append(warnings, healthMsg)
+						if strings.ToUpper(status.Connector.State) != "RUNNING" {
+							warnings = append(warnings, fmt.Sprintf("Connector %s state=%s", connector, status.Connector.State))
+						}
+						if len(failedTasks) > 0 {
+							warnings = append(warnings, fmt.Sprintf("Connector %s has failed task(s): %v", connector, failedTasks))
+							if strings.ToUpper(status.Connector.State) == "RUNNING" {
+								warnings = append(warnings, fmt.Sprintf("Connector %s may be in restart loop: connector RUNNING but tasks failing", connector))
+							}
+						}
+					}
+				}
+			}
+		}
+
 		// If this connector config points at a Kafka history topic, try to fetch schema changes
 		if topic, ok := connConfig.Config["database.history.kafka.topic"]; ok {
 			if topicStr, ok := topic.(string); ok {
 				if brokers, ok := connConfig.Config["database.history.kafka.bootstrap.servers"]; ok {
 					if brokersStr, ok := brokers.(string); ok {
-						// try to fetch schemas from kafka history (best effort)
-						schemas, err := fetchSchemasFromKafka(ctx, brokersStr, topicStr)
+						// try to fetch schemas and timestamps from kafka history (best effort)
+						schemas, times, err := fetchSchemasFromKafka(ctx, brokersStr, topicStr)
 						if err == nil {
 							for t, cols := range schemas {
 								capturedTables = append(capturedTables, t)
@@ -106,6 +165,12 @@ func (i *Inspector) Inspect(ctx context.Context) (*cdc.Result, error) {
 									tableSchemas = map[string]cdc.TableSchema{}
 								}
 								tableSchemas[t] = cdc.TableSchema{Columns: cols}
+								if schemaTimes == nil {
+									schemaTimes = map[string]time.Time{}
+								}
+								if ts, ok := times[t]; ok {
+									schemaTimes[t] = ts
+								}
 							}
 						}
 					}
@@ -122,13 +187,24 @@ func (i *Inspector) Inspect(ctx context.Context) (*cdc.Result, error) {
 	if tableSchemas != nil {
 		res.TableSchemas = tableSchemas
 	}
+	if schemaTimes != nil {
+		if res.SchemaTimestamps == nil {
+			res.SchemaTimestamps = map[string]time.Time{}
+		}
+		for k, v := range schemaTimes {
+			res.SchemaTimestamps[k] = v
+		}
+	}
+	if len(warnings) > 0 {
+		res.Warnings = warnings
+	}
 	return res, nil
 }
 
 // fetchSchemasFromKafka attempts to read recent messages from the given Kafka topic and
 // parse CREATE TABLE DDL statements to extract column names, types and nullability.
 // This is a best-effort approach and will skip messages that can't be parsed.
-func fetchSchemasFromKafka(ctx context.Context, brokersCSV, topic string) (map[string]map[string]cdc.ColumnInfo, error) {
+func fetchSchemasFromKafka(ctx context.Context, brokersCSV, topic string) (map[string]map[string]cdc.ColumnInfo, map[string]time.Time, error) {
 	brokers := []string{}
 	for _, b := range strings.Split(brokersCSV, ",") {
 		b = strings.TrimSpace(b)
@@ -137,7 +213,7 @@ func fetchSchemasFromKafka(ctx context.Context, brokersCSV, topic string) (map[s
 		}
 	}
 	if len(brokers) == 0 {
-		return nil, fmt.Errorf("no kafka brokers provided")
+		return nil, nil, fmt.Errorf("no kafka brokers provided")
 	}
 
 	r := kafka.NewReader(kafka.ReaderConfig{
@@ -156,6 +232,9 @@ func fetchSchemasFromKafka(ctx context.Context, brokersCSV, topic string) (map[s
 	reCreate := regexp.MustCompile(`(?is)CREATE\s+TABLE\s+` + "`?" + `([^\s` + "`" + `\.]+)` + "`?" + `\s*\((.*?)\)`) // captures table and contents
 	// regexp for column lines: `name` TYPE ... (NULL|NOT NULL)?
 	reCol := regexp.MustCompile("`([^`]+)`\\s+([A-Za-z0-9()_,]+).*?(NOT NULL|NULL)?")
+
+	// schemaTimes will hold the latest Kafka message timestamp observed per table
+	schemaTimes := map[string]time.Time{}
 
 	count := 0
 	for count < 500 {
@@ -198,13 +277,17 @@ func fetchSchemasFromKafka(ctx context.Context, brokersCSV, topic string) (map[s
 				}
 				if len(cols) > 0 {
 					schemas[table] = cols
+					// record the message timestamp as the last-seen DDL timestamp for this table
+					if _, ok := schemaTimes[table]; !ok || m.Time.After(schemaTimes[table]) {
+						schemaTimes[table] = m.Time
+					}
 				}
 			}
 		}
 	}
 
 	if len(schemas) == 0 {
-		return nil, fmt.Errorf("no schemas found in kafka topic %s", topic)
+		return nil, nil, fmt.Errorf("no schemas found in kafka topic %s", topic)
 	}
-	return schemas, nil
+	return schemas, schemaTimes, nil
 }

@@ -3,6 +3,7 @@ package drift
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/alexanderjulianmartinez/data-watch/internal/cdc"
 	"github.com/alexanderjulianmartinez/data-watch/internal/source"
@@ -76,6 +77,7 @@ func Validate(
 			if cdcResult.TableSchemas != nil {
 				if ctable, ok := cdcResult.TableSchemas[tname]; ok {
 					mysqlCols := getMysqlCols(mysqlTable)
+					hasMismatch := false
 					// Column exists in MySQL but not CDC -> INFO (column added)
 					for cname := range mysqlCols {
 						if _, exists := ctable.Columns[cname]; !exists {
@@ -85,6 +87,7 @@ func Validate(
 								Column:   cname,
 								Message:  MessageForChange("column_added", tname, cname, "", ""),
 							})
+							hasMismatch = true
 						}
 					}
 					// Column exists in CDC but not in MySQL -> BLOCK (column removed)
@@ -96,6 +99,7 @@ func Validate(
 								Column:   cname,
 								Message:  MessageForChange("column_removed", tname, cname, "", ""),
 							})
+							hasMismatch = true
 							continue
 						} else {
 							mcol := mysqlCols[cname]
@@ -107,6 +111,7 @@ func Validate(
 									Column:   cname,
 									Message:  fmt.Sprintf("%s.%s %s", tname, cname, MessageForChange("nullable_to_notnull", tname, cname, "", "")),
 								})
+								hasMismatch = true
 							}
 							// type mismatch -> WARN
 							if !strings.EqualFold(mcol.Type, ccol.Type) {
@@ -118,11 +123,45 @@ func Validate(
 									ToType:   ccol.Type,
 									Message:  fmt.Sprintf("%s.%s %s (%s -> %s)", tname, cname, MessageForChange("type_changed", tname, cname, mcol.Type, ccol.Type), mcol.Type, ccol.Type),
 								})
+								hasMismatch = true
+							}
+						}
+					}
+					// If there's a mismatch, check CDC schema timestamp vs MySQL table DDL time
+					if hasMismatch {
+						if mysqlTable.DDLTime != nil {
+							if cdcResult.SchemaTimestamps == nil {
+								report.Issues = append(report.Issues, Issue{
+									Severity: SeverityForChange("cdc_schema_stale"),
+									Table:    tname,
+									Message:  fmt.Sprintf("%s (MySQL DDL at %s, CDC last seen: none)", MessageForChange("cdc_schema_stale", tname, "", "", ""), mysqlTable.DDLTime.Format(time.RFC3339)),
+								})
+							} else if ts, ok := cdcResult.SchemaTimestamps[tname]; !ok || ts.Before(*mysqlTable.DDLTime) {
+								// CDC last schema change is older than MySQL DDL change
+								report.Issues = append(report.Issues, Issue{
+									Severity: SeverityForChange("cdc_schema_stale"),
+									Table:    tname,
+									Message:  fmt.Sprintf("%s (MySQL DDL at %s, CDC last seen: %s)", MessageForChange("cdc_schema_stale", tname, "", "", ""), mysqlTable.DDLTime.Format(time.RFC3339), ts.Format(time.RFC3339)),
+								})
 							}
 						}
 					}
 				}
 			}
+		}
+	}
+
+	// Convert CDC-level warnings into WARN-level issues. Classify snapshot vs connector-health warnings.
+	if cdcResult != nil && len(cdcResult.Warnings) > 0 {
+		for _, w := range cdcResult.Warnings {
+			kind := "cdc_connector_unhealthy"
+			if strings.Contains(w, "snapshot.mode") {
+				kind = "cdc_snapshot_issue"
+			}
+			report.Issues = append(report.Issues, Issue{
+				Severity: SeverityForChange(kind),
+				Message:  w,
+			})
 		}
 	}
 
