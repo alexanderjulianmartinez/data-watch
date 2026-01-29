@@ -16,13 +16,17 @@ Top-level object
       - `RowCount`: integer
       - `DDLTime`: RFC3339 timestamp string or `null`
 
-- `cdc`: object (optional)
-  - Mirrors `internal/cdc.Result` fields:
-    - `ConnectorReachable`: boolean
-    - `CapturedTables`: array of strings
-    - `TableSchemas`: object mapping table name -> schema (may be omitted)
-    - `SchemaTimestamps`: object mapping table name -> RFC3339 timestamp
-    - `Warnings`: array of strings
+- `connectors`: array of connector objects
+  - Each connector object contains:
+    - `name`: string (connector name)
+    - `cdc`: object (mirrors `internal/cdc.Result`):
+      - `ConnectorReachable`: boolean
+      - `CapturedTables`: array of strings
+      - `TableSchemas`: object mapping table name -> schema (may be omitted)
+      - `SchemaTimestamps`: object mapping table name -> RFC3339 timestamp
+      - `Warnings`: array of strings
+    - `drift`: object (connector-scoped drift report)
+    - `summary`: connector-scoped summary counts
 
 - `drift`: object
   - `Issues`: array of issue objects
@@ -60,15 +64,21 @@ Example
       }
     ]
   },
-  "cdc": {
-    "ConnectorReachable": true,
-    "CapturedTables": ["users"],
-    "Warnings": ["Connector foo has snapshot.mode=never; snapshots disabled or schema-only (CDC may miss initial data). This check will not attempt to trigger snapshots."]
-  },
-  "drift": {
-    "Issues": [
-      {"Severity":"WARN","Table":"users","Message":"cdc schema appears stale (MySQL DDL at 2026-01-28T12:34:56Z, CDC last seen: 2026-01-27T11:00:00Z)"}
-    ]
-  },
+  "connectors": [
+    {
+      "name": "foo",
+      "cdc": {
+        "ConnectorReachable": true,
+        "CapturedTables": ["users"],
+        "Warnings": ["Connector foo has snapshot.mode=never; snapshots disabled or schema-only (CDC may miss initial data). This check will not attempt to trigger snapshots."]
+      },
+      "drift": {
+        "Issues": [
+          {"Severity":"WARN","Table":"users","Message":"cdc schema appears stale (MySQL DDL at 2026-01-28T12:34:56Z, CDC last seen: 2026-01-27T11:00:00Z)"}
+        ]
+      },
+      "summary": {"info":0,"warn":1,"block":0}
+    }
+  ],
   "summary": {"info":0,"warn":1,"block":0}
 }

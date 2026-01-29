@@ -22,6 +22,12 @@ type Result struct {
 	Warnings           []string
 }
 
+// ConnectorResult pairs a connector name with its inspection Result.
+type ConnectorResult struct {
+	Name   string
+	Result *Result
+}
+
 type Inspector interface {
 	Name() string
 	Inspect(ctx context.Context) (*Result, error)

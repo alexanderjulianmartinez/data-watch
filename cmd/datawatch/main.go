@@ -77,29 +77,72 @@ func runCheck(args []string) error {
 		fmt.Printf("  Row count: %d\n", table.RowCount)
 	}
 
-	var cdcResult *cdc.Result
+	// Collect per-connector CDC inspection results (if supported)
+	var connectorResults []*cdc.ConnectorResult
 	if cfg.CDC.Type == "debezium" {
 		inspector := debezium.New(cfg.CDC)
-		cdcResult, err = inspector.Inspect(context.Background())
-		if err != nil {
-			return err
-		}
-		fmt.Println("\nCDC:", inspector.Name())
-		fmt.Println("  Connector reachable:", cdcResult.ConnectorReachable)
-		if len(cdcResult.CapturedTables) > 0 {
-			fmt.Println("  CDC Tables:", cdcResult.CapturedTables)
-		}
-		if len(cdcResult.Warnings) > 0 {
-			fmt.Println("  Warnings:")
-			for _, w := range cdcResult.Warnings {
-				fmt.Printf("    - %s\n", w)
+		// Prefer InspectConnectors when available
+		if multi, ok := (interface{}(inspector)).(interface {
+			InspectConnectors(context.Context) ([]*cdc.ConnectorResult, error)
+		}); ok {
+			connectorResults, err = multi.InspectConnectors(context.Background())
+			if err != nil {
+				return err
+			}
+			fmt.Println("\nCDC:", inspector.Name())
+			for _, cr := range connectorResults {
+				fmt.Printf("  Connector: %s\n", cr.Name)
+				fmt.Printf("    Connector reachable: %v\n", cr.Result.ConnectorReachable)
+				if len(cr.Result.CapturedTables) > 0 {
+					fmt.Printf("    CDC Tables: %v\n", cr.Result.CapturedTables)
+				}
+				if len(cr.Result.Warnings) > 0 {
+					fmt.Println("    Warnings:")
+					for _, w := range cr.Result.Warnings {
+						fmt.Printf("      - %s\n", w)
+					}
+				}
+			}
+		} else {
+			// Fallback to legacy aggregated Inspect
+			single, err := inspector.Inspect(context.Background())
+			if err != nil {
+				return err
+			}
+			connectorResults = []*cdc.ConnectorResult{{Name: "", Result: single}}
+			fmt.Println("\nCDC:", inspector.Name())
+			fmt.Println("  Connector reachable:", single.ConnectorReachable)
+			if len(single.CapturedTables) > 0 {
+				fmt.Println("  CDC Tables:", single.CapturedTables)
+			}
+			if len(single.Warnings) > 0 {
+				fmt.Println("  Warnings:")
+				for _, w := range single.Warnings {
+					fmt.Printf("    - %s\n", w)
+				}
 			}
 		}
 	}
 
 	// Do not auto-populate CDC schemas from MySQL. Only use CDC-provided schemas for validation.
 
-	report := drift.Validate(mysqlResult, cdcResult)
+	// Validate per-connector and aggregate issues for summary
+	reportsByConnector := map[string]*drift.Report{}
+	overallIssues := []drift.Issue{}
+	if len(connectorResults) == 0 {
+		// No CDC connectors detected; validate with nil CDC result
+		rep := drift.Validate(mysqlResult, nil)
+		reportsByConnector[""] = rep
+		overallIssues = append(overallIssues, rep.Issues...)
+	} else {
+		for _, cr := range connectorResults {
+			rep := drift.Validate(mysqlResult, cr.Result)
+			reportsByConnector[cr.Name] = rep
+			overallIssues = append(overallIssues, rep.Issues...)
+		}
+	}
+	// Combined report for backwards compatibility
+	report := &drift.Report{Issues: overallIssues}
 
 	// Compute highest severity (0=info/none,1=warn,2=block)
 	highest := 0
@@ -135,30 +178,54 @@ func runCheck(args []string) error {
 
 	// If JSON is requested, emit structured output and exit according to --fail-on
 	if strings.ToLower(strings.TrimSpace(*format)) == "json" {
+		// Build per-connector JSON structure
+		type connectorOut struct {
+			Name    string        `json:"name"`
+			CDC     *cdc.Result   `json:"cdc,omitempty"`
+			Drift   *drift.Report `json:"drift,omitempty"`
+			Summary struct {
+				Info  int `json:"info"`
+				Warn  int `json:"warn"`
+				Block int `json:"block"`
+			} `json:"summary"`
+		}
 		out := struct {
-			MySQLResult interface{}   `json:"mysql"`
-			CDC         *cdc.Result   `json:"cdc,omitempty"`
-			Drift       *drift.Report `json:"drift"`
-			Summary     struct {
+			MySQL      interface{}    `json:"mysql"`
+			Connectors []connectorOut `json:"connectors"`
+			Summary    struct {
 				Info  int `json:"info"`
 				Warn  int `json:"warn"`
 				Block int `json:"block"`
 			} `json:"summary"`
 		}{
-			MySQLResult: mysqlResult,
-			CDC:         cdcResult,
-			Drift:       report,
+			MySQL: mysqlResult,
 		}
-		// Populate summary counts
-		for _, iss := range report.Issues {
-			switch iss.Severity {
-			case drift.SeverityBlock:
-				out.Summary.Block++
-			case drift.SeverityWarn:
-				out.Summary.Warn++
-			case drift.SeverityInfo:
-				out.Summary.Info++
+
+		// populate connectors
+		for name, rep := range reportsByConnector {
+			c := connectorOut{Name: name}
+			// find matching cdc result
+			for _, cr := range connectorResults {
+				if cr.Name == name {
+					c.CDC = cr.Result
+					break
+				}
 			}
+			c.Drift = rep
+			for _, iss := range rep.Issues {
+				switch iss.Severity {
+				case drift.SeverityBlock:
+					c.Summary.Block++
+				case drift.SeverityWarn:
+					c.Summary.Warn++
+				case drift.SeverityInfo:
+					c.Summary.Info++
+				}
+			}
+			out.Connectors = append(out.Connectors, c)
+			out.Summary.Block += c.Summary.Block
+			out.Summary.Warn += c.Summary.Warn
+			out.Summary.Info += c.Summary.Info
 		}
 
 		b, err := json.MarshalIndent(out, "", "  ")

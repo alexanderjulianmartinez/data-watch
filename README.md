@@ -21,87 +21,80 @@ DataWatch v1 performs read-only validation across a narrow, well-defined surface
 ### Schema Consistency
 * Detects missing or extra columns
 * Detects type mismatches
-* Detects nullablility drift
+# DataWatch
 
-### Row Count Drift
-* Compares source table row counts against CDC event counts
-* Reports percentage deltas within a configurable window
+DataWatch is a small, read-only validation tool for Change Data Capture (CDC) pipelines.
+It compares a source MySQL schema and counts to CDC-derived schemas and events, then reports differences that may indicate silent data loss or schema drift.
 
-### Primary Key Coverage
-* Verifies pimary key exists in the source
-* Verifies primary keys are present in CDC payloads
+## What DataWatch Detects
+- Schema inconsistencies between source and CDC:
+  - missing columns present in source but absent from CDC
+  - columns present in CDC but missing in source
+  - column type mismatches (case-insensitive type comparison)
+  - nullable -> NOT NULL changes
+- Primary key issues:
+  - source tables without primary keys (unsafe for CDC)
+  - missing primary key information in CDC schemas
+- CDC schema staleness:
+  - CDC schema history timestamps older than a source DDL change
+- Connector-level problems (Debezium):
+  - snapshot mode disabled or set to schema-only
+  - failed connector tasks and possible restart loops
+- Simple row-count and lag hints (best-effort):
+  - percent delta between source row counts and CDC event counts
+  - last-seen timestamps in CDC to estimate lag
 
-### Replication Lag
-* Measures time lag between the newest source record and CDC events
-* Surfaces unhealthy replication delays
+All checks are read-only and best-effort where external systems (Kafka, Debezium) are involved.
 
-## What DataWatch Does Not Do
-DataWatch is intentionally narrow in scope.
+## What DataWatch Intentionally Does Not Detect
+- It does not repair data or replay events.
+- It does not attempt to reconfigure or restart connectors.
+- It does not provide long-running monitoring, alerting, or dashboards.
+- It does not guarantee semantic correctness of downstream consumers (only reports mismatches it observes).
+- It does not attempt deep content validation (e.g., per-row checksum reconciliation across large tables).
 
-It does not:
-* repair data
-* replay CDC events
-* enforce schemas
-* guarantee exactly-once semantics
-* run continously as a service
-* provide alerting or dashboards
-* replace CDC platforms
+These limitations are intentional: the tool focuses on clear, actionable detection without making change or hiding configuration problems behind defaults.
 
-Its goal is detection and visibility, not orchestration.
+## Examples of Dangerous CDC Drift
+- Schema-only snapshots or `snapshot.mode=never`: initial rows missing from CDC while schema appears present.
+- MySQL `ALTER TABLE` added a column `email` but CDC schema-history has an older timestamp and does not include `email` — writes to `email` may be silently lost from downstream views.
+- A connector repeatedly fails a task but reports `RUNNING` for the connector: this pattern often indicates a restart loop where commits may be dropped.
+- A column changed from `NULL` to `NOT NULL` in CDC but remains nullable in source — this can cause consumer-side errors or silent truncation depending on transformation logic.
 
-## Supported Systems (v1)
-DataWatch v1 deliberately supports a minimal set of systems:
-* Source database: MySQL 8
-* CDC: Debezium
-* Transport: Kafka (JSON payloads)
-
-Support for additional databases or CDC platforms may be added later, but correctness and clarity take priority over breadth.
-
-## How it Works
-At a high level, DataWatch runs a point-in-time validation pass:
-1. Inspect source database schemas and row counts
-2. Inspect CDC stream schemas, event counts, and timestamps
-3. Compare results using explicit, deterministic rules
-4. Emit a structured report describing health and drift
-
-DataWatch can be run:
-* manually
-* on a schedule (e.g. via cron)
-* as part of migration or deployement workflows
-
-## Example Output
-```json
-{
-  "table": "users",
-  "schemaDrift": false,
-  "rowCountDeltaPct": 0.4,
-  "missingPrimaryKey": false,
-  "cdcLagSeconds": 12,
-  "status": "healthy"
-}
-```
-
-## Design Principles
-DataWatch is built around a few core principles:
-* Correctness over completeness
-* Explicit checks over heuristics
-* Fail loudly and report cleanly
-* Read-only, non-invasive operation
-* Simple interfaces with sharp edges
-
-These constraints are intentional and foundational.
-
-## Non-Goals
-DataWatch is not:
-* a general observability platform
-* a streaming framework
-* a managed service
-* a silver bullet for bad pipelines
-
-Is is a validation tool designed to be trusted, understood, and extended thoughtfully.
+Each example should be investigated in the context of your pipeline; DataWatch surfaces these as warnings or higher-severity issues so operators can triage.
 
 ## Getting Started
-DataWatch is under active development. Installation and usage instructions will be added as core checks are implemented.
+Prerequisites
+- Go 1.20+ to build and run the tool
+- MySQL 8-compatible server reachable from the runner for schema inspection
+- Debezium connectors (if validating CDC) with the Connect REST API reachable
+- Optional: Kafka brokers and access to the Debezium database history topic for schema timestamps
+
+Quick run (local, read-only):
+
+1. Edit `examples/config.yaml` to point at your environment.
+2. Build and run the check:
+
+```bash
+go run ./cmd/datawatch check --config examples/config.yaml
+```
+
+3. For machine-readable output, use JSON:
+
+```bash
+go run ./cmd/datawatch check --config examples/config.yaml --format json
+```
+
+Interpreting results
+- The tool emits per-connector warnings and a drift report grouped by table/column and severity.
+- Treat `BLOCK` severity as blocking (requires immediate attention); `WARN` as actionable warnings to investigate; `INFO` as informational.
+
+Configuration and validation
+- The loader performs strict validation and fails fast on misconfiguration; correct the config errors shown by the tool before relying on results.
+
+Notes and next steps
+- The current implementation supports MySQL and Debezium (Kafka). Adding more sources or CDC platforms is possible but will be explicit.
+- The tool is intentionally conservative: it favors deterministic checks and helpful errors over heuristics.
 
 ## License
 Apache License 2.0

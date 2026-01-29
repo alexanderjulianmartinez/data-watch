@@ -3,7 +3,9 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -59,25 +61,63 @@ func LoadConfig(path string) (*Config, error) {
 }
 
 func (c *Config) validate() error {
-	if c.Source.Type != "mysql" {
-		return errors.New("source.type must be mysql")
+	var errs []string
+
+	if strings.TrimSpace(c.Source.Type) == "" {
+		errs = append(errs, "source.type is required and must be 'mysql'")
+	} else if c.Source.Type != "mysql" {
+		errs = append(errs, "unsupported source.type: only 'mysql' is supported")
 	}
-	if c.Source.DSN == "" {
-		return errors.New("source.dsn is required")
+	if strings.TrimSpace(c.Source.DSN) == "" {
+		errs = append(errs, "source.dsn is required")
 	}
-	if c.Source.Schema == "" {
-		return errors.New("source.schema is required")
+	if strings.TrimSpace(c.Source.Schema) == "" {
+		errs = append(errs, "source.schema is required")
 	}
+
+	if strings.TrimSpace(c.CDC.Type) == "" {
+		errs = append(errs, "cdc.type is required (e.g. 'debezium')")
+	} else if c.CDC.Type != "debezium" {
+		errs = append(errs, "unsupported cdc.type: only 'debezium' is supported")
+	}
+	// Debezium specific checks
+	if c.CDC.Type == "debezium" {
+		if strings.TrimSpace(c.CDC.ConnectURL) == "" {
+			errs = append(errs, "cdc.connect_url is required for debezium connectors")
+		} else {
+			// basic URL validation
+			if u, err := url.Parse(c.CDC.ConnectURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				errs = append(errs, fmt.Sprintf("cdc.connect_url must be a valid http(s) URL: %s", c.CDC.ConnectURL))
+			}
+		}
+		// Validate brokers if present
+		for _, b := range c.CDC.Brokers {
+			if strings.TrimSpace(b) == "" || !strings.Contains(b, ":") {
+				errs = append(errs, fmt.Sprintf("cdc.brokers contains invalid broker address: %q", b))
+			}
+		}
+	}
+
 	if len(c.Tables) == 0 {
-		return errors.New("at least one table is required")
+		errs = append(errs, "at least one table is required in tables")
 	}
 	for _, table := range c.Tables {
-		if table.Name == "" {
-			return errors.New("table.name is required")
+		if strings.TrimSpace(table.Name) == "" {
+			errs = append(errs, "table.name is required")
+			continue
 		}
 		if len(table.PrimaryKey) == 0 {
-			return fmt.Errorf("table %s must define primaryKey", table.Name)
+			errs = append(errs, fmt.Sprintf("table %s must define primaryKey", table.Name))
 		}
+		for _, pk := range table.PrimaryKey {
+			if strings.TrimSpace(pk) == "" {
+				errs = append(errs, fmt.Sprintf("table %s has empty primaryKey entry", table.Name))
+			}
+		}
+	}
+
+	if len(errs) > 0 {
+		return errors.New("config validation failed:\n  - " + strings.Join(errs, "\n  - "))
 	}
 	return nil
 }
