@@ -241,76 +241,171 @@ func runCheck(args []string) error {
 
 	// Human-readable output (default)
 	fmt.Println("\nDrift Check:")
-	if len(report.Issues) == 0 {
-		fmt.Println("    No drift detected")
-	} else {
-		// Primary key summary
-		pkProblems := 0
-		for _, iss := range report.Issues {
-			if iss.Severity == drift.SeverityBlock && strings.Contains(iss.Message, "primary key") {
-				pkProblems++
+	// If we have per-connector reports, print each connector's drift separately.
+	if len(reportsByConnector) > 0 && len(connectorResults) > 0 {
+		for _, cr := range connectorResults {
+			name := cr.Name
+			rep := reportsByConnector[name]
+			if rep == nil {
+				continue
 			}
-		}
-		if pkProblems == 0 {
-			fmt.Println("    Primary Keys match")
-		}
+			fmt.Printf("  Connector: %s\n", name)
+			if len(rep.Issues) == 0 {
+				fmt.Println("    No drift detected")
+				continue
+			}
 
-		// Group issues by table
-		tblIssues := map[string][]drift.Issue{}
-		sevCount := map[string]int{}
-		for _, iss := range report.Issues {
-			tblIssues[iss.Table] = append(tblIssues[iss.Table], iss)
-			sevCount[iss.Severity]++
-		}
-
-		// Print table-scoped and column-scoped issues (deterministic order)
-		var tables []string
-		for t := range tblIssues {
-			tables = append(tables, t)
-		}
-		sort.Strings(tables)
-		for _, t := range tables {
-			fmt.Printf("    Table: %s\n", t)
-			// print table-level issues first
-			for _, iss := range tblIssues[t] {
-				if iss.Column == "" {
-					fmt.Printf("      - [%s] %s\n", iss.Severity, iss.Message)
+			// Primary key summary for this connector
+			pkProblems := 0
+			for _, iss := range rep.Issues {
+				if iss.Severity == drift.SeverityBlock && strings.Contains(iss.Message, "primary key") {
+					pkProblems++
 				}
 			}
-			// collect column-scoped issues
-			colMap := map[string][]drift.Issue{}
-			for _, iss := range tblIssues[t] {
-				if iss.Column != "" {
-					colMap[iss.Column] = append(colMap[iss.Column], iss)
+			if pkProblems == 0 {
+				fmt.Println("    Primary Keys match")
+			}
+
+			// Group issues by table
+			tblIssues := map[string][]drift.Issue{}
+			sevCount := map[string]int{}
+			for _, iss := range rep.Issues {
+				tblIssues[iss.Table] = append(tblIssues[iss.Table], iss)
+				sevCount[iss.Severity]++
+			}
+
+			// Print issues by table (deterministic order)
+			var tables []string
+			for t := range tblIssues {
+				tables = append(tables, t)
+			}
+			sort.Strings(tables)
+			for _, t := range tables {
+				if t == "" {
+					fmt.Println("    Connector-level issues:")
+				} else {
+					fmt.Printf("    Table: %s\n", t)
 				}
-			}
-			var cols []string
-			for c := range colMap {
-				cols = append(cols, c)
-			}
-			sort.Strings(cols)
-			for _, c := range cols {
-				for _, iss := range colMap[c] {
-					msg := iss.Message
-					if iss.FromType != "" || iss.ToType != "" {
-						msg = fmt.Sprintf("%s (%s -> %s)", msg, iss.FromType, iss.ToType)
+				// print table-level issues first
+				for _, iss := range tblIssues[t] {
+					if iss.Column == "" {
+						if t == "" {
+							fmt.Printf("      - [%s] %s\n", iss.Severity, iss.Message)
+						} else {
+							fmt.Printf("      - [%s] %s\n", iss.Severity, iss.Message)
+						}
 					}
-					fmt.Printf("      - [%s] %s.%s %s\n", iss.Severity, iss.Table, iss.Column, msg)
+				}
+				// collect column-scoped issues
+				colMap := map[string][]drift.Issue{}
+				for _, iss := range tblIssues[t] {
+					if iss.Column != "" {
+						colMap[iss.Column] = append(colMap[iss.Column], iss)
+					}
+				}
+				var cols []string
+				for c := range colMap {
+					cols = append(cols, c)
+				}
+				sort.Strings(cols)
+				for _, c := range cols {
+					for _, iss := range colMap[c] {
+						msg := iss.Message
+						if iss.FromType != "" || iss.ToType != "" {
+							msg = fmt.Sprintf("%s (%s -> %s)", msg, iss.FromType, iss.ToType)
+						}
+						fmt.Printf("      - [%s] %s.%s %s\n", iss.Severity, iss.Table, iss.Column, msg)
+					}
 				}
 			}
-		}
 
-		// Summary
-		info := sevCount[drift.SeverityInfo]
-		warn := sevCount[drift.SeverityWarn]
-		block := sevCount[drift.SeverityBlock]
-		fmt.Printf("\nSummary: %d INFO / %d WARN / %d BLOCK\n", info, warn, block)
-		if block > 0 {
-			suffix := "s"
-			if block == 1 {
-				suffix = ""
+			// Connector summary
+			info := sevCount[drift.SeverityInfo]
+			warn := sevCount[drift.SeverityWarn]
+			block := sevCount[drift.SeverityBlock]
+			fmt.Printf("\n    Summary: %d INFO / %d WARN / %d BLOCK\n", info, warn, block)
+			if block > 0 {
+				suffix := "s"
+				if block == 1 {
+					suffix = ""
+				}
+				fmt.Printf("    Result: FAILED (%d blocking issue%s)\n", block, suffix)
 			}
-			fmt.Printf("Result: FAILED (%d blocking issue%s)\n", block, suffix)
+			fmt.Println()
+		}
+	} else {
+		// Legacy single combined report
+		if len(report.Issues) == 0 {
+			fmt.Println("    No drift detected")
+		} else {
+			// Primary key summary
+			pkProblems := 0
+			for _, iss := range report.Issues {
+				if iss.Severity == drift.SeverityBlock && strings.Contains(iss.Message, "primary key") {
+					pkProblems++
+				}
+			}
+			if pkProblems == 0 {
+				fmt.Println("    Primary Keys match")
+			}
+
+			// Group issues by table
+			tblIssues := map[string][]drift.Issue{}
+			sevCount := map[string]int{}
+			for _, iss := range report.Issues {
+				tblIssues[iss.Table] = append(tblIssues[iss.Table], iss)
+				sevCount[iss.Severity]++
+			}
+
+			// Print table-scoped and column-scoped issues (deterministic order)
+			var tables []string
+			for t := range tblIssues {
+				tables = append(tables, t)
+			}
+			sort.Strings(tables)
+			for _, t := range tables {
+				fmt.Printf("    Table: %s\n", t)
+				// print table-level issues first
+				for _, iss := range tblIssues[t] {
+					if iss.Column == "" {
+						fmt.Printf("      - [%s] %s\n", iss.Severity, iss.Message)
+					}
+				}
+				// collect column-scoped issues
+				colMap := map[string][]drift.Issue{}
+				for _, iss := range tblIssues[t] {
+					if iss.Column != "" {
+						colMap[iss.Column] = append(colMap[iss.Column], iss)
+					}
+				}
+				var cols []string
+				for c := range colMap {
+					cols = append(cols, c)
+				}
+				sort.Strings(cols)
+				for _, c := range cols {
+					for _, iss := range colMap[c] {
+						msg := iss.Message
+						if iss.FromType != "" || iss.ToType != "" {
+							msg = fmt.Sprintf("%s (%s -> %s)", msg, iss.FromType, iss.ToType)
+						}
+						fmt.Printf("      - [%s] %s.%s %s\n", iss.Severity, iss.Table, iss.Column, msg)
+					}
+				}
+			}
+
+			// Summary
+			info := sevCount[drift.SeverityInfo]
+			warn := sevCount[drift.SeverityWarn]
+			block := sevCount[drift.SeverityBlock]
+			fmt.Printf("\nSummary: %d INFO / %d WARN / %d BLOCK\n", info, warn, block)
+			if block > 0 {
+				suffix := "s"
+				if block == 1 {
+					suffix = ""
+				}
+				fmt.Printf("Result: FAILED (%d blocking issue%s)\n", block, suffix)
+			}
 		}
 	}
 
