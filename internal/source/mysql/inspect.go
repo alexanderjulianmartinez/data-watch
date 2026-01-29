@@ -39,11 +39,17 @@ func (i *Inspector) Inspect(ctx context.Context) (*source.InspectionResult, erro
 			})
 		}
 
+		ddlTime, err := i.FetchTableDDLTime(ctx, tableName)
+		if err != nil {
+			return nil, err
+		}
+
 		results = append(results, source.TableInfo{
 			Name:       tableName,
 			Columns:    columns,
 			PrimaryKey: primaryKey,
 			RowCount:   rowCount,
+			DDLTime:    ddlTime,
 		})
 	}
 

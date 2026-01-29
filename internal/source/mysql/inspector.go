@@ -119,7 +119,26 @@ func (i *Inspector) FetchRowCount(ctx context.Context, tableName string) (int64,
 	return count, nil
 }
 
-func (i *Inspector) FetchLatestTimestamp(ctx context.Context, tableName string, column string,) (*time.Time, error) {
+// FetchTableDDLTime returns a best-effort timestamp for the table DDL. It prefers
+// UPDATE_TIME if available, otherwise falls back to CREATE_TIME. Returns nil if
+// neither is available.
+func (i *Inspector) FetchTableDDLTime(ctx context.Context, tableName string) (*time.Time, error) {
+	var createTime sql.NullTime
+	var updateTime sql.NullTime
+	query := `SELECT CREATE_TIME, UPDATE_TIME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? LIMIT 1`
+	if err := i.db.QueryRowContext(ctx, query, i.schema, tableName).Scan(&createTime, &updateTime); err != nil {
+		return nil, err
+	}
+	if updateTime.Valid {
+		return &updateTime.Time, nil
+	}
+	if createTime.Valid {
+		return &createTime.Time, nil
+	}
+	return nil, nil
+}
+
+func (i *Inspector) FetchLatestTimestamp(ctx context.Context, tableName string, column string) (*time.Time, error) {
 	query := fmt.Sprintf("SELECT MAX(%s) FROM `%s`", column, tableName)
 	var ts sql.NullTime
 	err := i.db.QueryRowContext(ctx, query).Scan(&ts)
