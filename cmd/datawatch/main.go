@@ -36,38 +36,38 @@ func run(args []string) error {
 		printUsage()
 		return nil
 	default:
-		return fmt.Errorf("Unknown command: %s", args[1])
+		return fmt.Errorf("Unknown command: %s. Run 'datawatch help' for usage.", args[1])
 	}
 }
 
 func runCheck(args []string) error {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
-	configPath := fs.String("config", "", "Path to config.yaml")
-	failOn := fs.String("fail-on", "block", "Severity level that causes a non-zero exit. One of: info,warn,block")
-	format := fs.String("format", "human", "Output format: human or json")
+	configPath := fs.String("config", "", "Path to config YAML file (required)")
+	failOn := fs.String("fail-on", "block", "Exit non-zero if highest issue severity >= LEVEL. One of: info,warn,block")
+	format := fs.String("format", "human", "Output format. One of: human, json (default: human)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	if *configPath == "" {
-		return fmt.Errorf("missing required flag: --config")
+		return fmt.Errorf("required flag --config is missing; run 'datawatch help' for usage")
 	}
 
 	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to load config %s: %w", *configPath, err)
 	}
 
 	inspector, err := mysql.NewInspector(cfg.Source.DSN, cfg.Source.Schema)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create MySQL inspector: %w", err)
 	}
 
 	ctx := context.Background()
 	mysqlResult, err := inspector.Inspect(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("mysql inspection failed: %w", err)
 	}
 
 	fmt.Printf("Found %d table(s) in MySQL\n", len(mysqlResult.Tables))
@@ -87,7 +87,7 @@ func runCheck(args []string) error {
 		}); ok {
 			connectorResults, err = multi.InspectConnectors(context.Background())
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to inspect CDC connectors: %w", err)
 			}
 			fmt.Println("\nCDC:", inspector.Name())
 			for _, cr := range connectorResults {
@@ -107,7 +107,7 @@ func runCheck(args []string) error {
 			// Fallback to legacy aggregated Inspect
 			single, err := inspector.Inspect(context.Background())
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to inspect CDC (legacy): %w", err)
 			}
 			connectorResults = []*cdc.ConnectorResult{{Name: "", Result: single}}
 			fmt.Println("\nCDC:", inspector.Name())
@@ -420,10 +420,19 @@ func printUsage() {
 	fmt.Print(`DataWatch - CDC validation tool
 
 Usage:
-  datawatch check --config <path>
+	datawatch check --config <path> [--format json|human] [--fail-on info|warn|block]
 
 Commands:
-  check     Run validatuib checks
-  help      Show this help message
+	check     Run validation checks against MySQL and CDC connectors
+	help      Show this help message
+
+Flags (check):
+	--config    Path to config YAML file (required)
+	--format    Output format: 'human' (default) or 'json'
+	--fail-on   Exit non-zero if highest issue severity >= LEVEL. One of: info, warn, block
+
+Examples:
+	datawatch check --config examples/config.yaml
+	datawatch check --config examples/config.yaml --format json --fail-on warn
 `)
 }
