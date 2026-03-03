@@ -1,6 +1,6 @@
 module github.com/alexanderjulianmartinez/data-watch
 
-go 1.25.6
+go 1.24.3
 
 require (
 	github.com/go-sql-driver/mysql v1.9.3
