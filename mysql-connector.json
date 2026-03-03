@@ -11,7 +11,7 @@
         "database.include.list": "testdb",
         "topic.prefix": "data-watch",
         "table.include.list": "testdb.orders,testdb.users",
-        "database.history.kafka.bootstrap.servers": "kafka:9092",
-        "database.history.kafka.topic": "schema-changes.testdb"
+        "database.history.internal.kafka.bootstrap.servers": "kafka:9092",
+        "database.history.internal.kafka.topic": "schema-changes.testdb"
     }
 }
